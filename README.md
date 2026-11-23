@@ -1,11 +1,19 @@
-<div align="center">
+# Nexus HRM — Enterprise Multi-Branch Human Resource Management
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Full-stack TypeScript enterprise HRM workspace built with **React 19**, **Tailwind CSS v4**, **Express 5**, and **SQLite (`node:sqlite`)**.
 
-  <h1>Built with AI Studio</h2>
+## Core Capabilities
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+- **Enterprise Security & Governance**: `scrypt` password hashing, DB-tracked account lockout, RFC 6238 TOTP MFA with 8 single-use recovery codes, uniform server-side RBAC matrix, and SHA-256 tamper-evident hash-chained audit logging.
+- **Multi-Branch Enterprise Topology**: Single-company workspace (`Nexus Technologies Inc.`) with regional office branches (Austin HQ, New York East, London EMEA, Singapore APAC), cost centers, state tax rates, and regional holiday calendars.
+- **Statutory Payroll & Benefits Engine**: Multi-stage payroll governance (`Draft → Simulated → Approved → Finalized/Locked`), progressive federal tax brackets, state tax, FICA Social Security cap & Additional Medicare, pre-tax 401(k)/Section 125 deductions, mid-period proration, overtime, variance anomaly detection, printable payslips, Bank ACH & Statutory CSV exports, and COBRA administration.
+- **Core HR, Time & Talent**: Employee directory, interactive Org Chart, onboarding/exit clearances, self-service clock-in/out & shift builder, workflow-routed leave requests, Recruitment ATS with Public Career Portal & one-click Hire-to-Employee, and Performance Calibration & OKRs.
+- **Workplace Operations & Executive Intelligence**: Workflow-routed expenses, IT hardware asset custody, digital policy sign-offs, payroll-linked loans, HR Help Desk, Executive Analytics with CSV export, and Custom Approval Workflow Builder.
+- **Public REST API v1 & Outbound Webhooks**: Versioned `/api/v1/*` endpoints with OpenAPI 3.1 schema, scoped Bearer API keys, biometric terminal sync (`POST /api/v1/integrations/biometric-sync`), and HMAC-SHA256 signed outbound webhooks.
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## Scripts
 
-</div>
+- `npm run dev` — Start Express + Vite full-stack server on port 3000
+- `npm run build` — Compile production frontend bundle
+- `npm run lint` — TypeScript static check (`tsc --noEmit`)
+- `npm test` — Run pure domain unit test suite (`node:test`)
