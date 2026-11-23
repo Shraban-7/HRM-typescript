@@ -12,14 +12,14 @@ opsRouter.use(requireAuth);
 // ---------------------------------------------------------------------------
 // Unified Workplace Operations (Assets, Policies, Expenses, Loans, Help Desk)
 // ---------------------------------------------------------------------------
-opsRouter.get('/operations', (req: AuthedRequest, res) => {
+opsRouter.get('/operations', async (req: AuthedRequest, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
   const canManage =
     req.user!.roles.includes('super_admin') ||
     req.user!.roles.includes('hr_admin') ||
     req.user!.roles.includes('manager');
 
-  const assets = db
+  const assets = await db
     .prepare(
       `SELECT a.*, b.name as branch_name, e.full_name as assigned_employee_name, e.employee_code
        FROM assets a
@@ -31,7 +31,7 @@ opsRouter.get('/operations', (req: AuthedRequest, res) => {
     .all(...(branchId ? [branchId] : []));
 
   const empId = req.user!.employeeId ?? -1;
-  const policies = db
+  const policies = await db
     .prepare(
       `SELECT cp.*,
               (SELECT COUNT(*) FROM policy_acknowledgements pa WHERE pa.policy_id = cp.id) as ack_count,
@@ -42,7 +42,7 @@ opsRouter.get('/operations', (req: AuthedRequest, res) => {
     )
     .all(empId);
 
-  const expenses = db
+  const expenses = await db
     .prepare(
       `SELECT x.*, e.full_name as employee_name, e.employee_code, b.name as branch_name
        FROM expenses x
@@ -55,7 +55,7 @@ opsRouter.get('/operations', (req: AuthedRequest, res) => {
     )
     .all(...[...(branchId ? [branchId] : []), ...(canManage ? [] : [empId])]);
 
-  const loans = db
+  const loans = await db
     .prepare(
       `SELECT l.*, e.full_name as employee_name, e.employee_code, b.name as branch_name
        FROM loans l
@@ -68,7 +68,7 @@ opsRouter.get('/operations', (req: AuthedRequest, res) => {
     )
     .all(...[...(branchId ? [branchId] : []), ...(canManage ? [] : [empId])]);
 
-  const tickets = db
+  const tickets = await db
     .prepare(
       `SELECT t.*, e.full_name as employee_name, e.employee_code,
               (SELECT COUNT(*) FROM ticket_comments tc WHERE tc.ticket_id = t.id) as comment_count
@@ -83,7 +83,7 @@ opsRouter.get('/operations', (req: AuthedRequest, res) => {
 });
 
 // Assets
-opsRouter.post('/assets', requirePermission('ops.manage'), (req: AuthedRequest, res) => {
+opsRouter.post('/assets', requirePermission('ops.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     assetTag: z.string().min(3).max(40),
     category: z.string().min(2).max(60),
@@ -99,13 +99,13 @@ opsRouter.post('/assets', requirePermission('ops.manage'), (req: AuthedRequest, 
   }
   const d = parsed.data;
   try {
-    const info = db
+    const info = await db
       .prepare(
         `INSERT INTO assets (asset_tag, category, name, serial_number, branch_id, cost, purchase_date, status)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'available')`
       )
       .run(d.assetTag.toUpperCase(), d.category, d.name, d.serialNumber, d.branchId, d.cost, new Date().toISOString().slice(0, 10));
-    recordAuditLog({
+    await recordAuditLog({
       user: req.user,
       action: 'asset.created',
       resource: 'assets',
@@ -119,7 +119,7 @@ opsRouter.post('/assets', requirePermission('ops.manage'), (req: AuthedRequest, 
   }
 });
 
-opsRouter.post('/assets/:id/assign', requirePermission('ops.manage'), (req: AuthedRequest, res) => {
+opsRouter.post('/assets/:id/assign', requirePermission('ops.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
   const schema = z.object({ employeeId: z.number().int().positive().nullable() });
   const parsed = schema.safeParse(req.body);
@@ -128,12 +128,10 @@ opsRouter.post('/assets/:id/assign', requirePermission('ops.manage'), (req: Auth
     return;
   }
   const empId = parsed.data.employeeId;
-  db.prepare('UPDATE assets SET assigned_employee_id = ?, status = ? WHERE id = ?').run(
-    empId,
-    empId ? 'assigned' : 'available',
-    id
-  );
-  recordAuditLog({
+  await db
+    .prepare('UPDATE assets SET assigned_employee_id = ?, status = ? WHERE id = ?')
+    .run(empId, empId ? 'assigned' : 'available', id);
+  await recordAuditLog({
     user: req.user,
     action: empId ? 'asset.assigned' : 'asset.returned',
     resource: 'assets',
@@ -144,19 +142,22 @@ opsRouter.post('/assets/:id/assign', requirePermission('ops.manage'), (req: Auth
   res.json({ ok: true });
 });
 
-// Policies
-opsRouter.post('/policies/:id/acknowledge', (req: AuthedRequest, res) => {
+// Policies (standard ON CONFLICT works identically in PostgreSQL and SQLite)
+opsRouter.post('/policies/:id/acknowledge', async (req: AuthedRequest, res) => {
   const policyId = Number(req.params.id);
   const empId = req.user!.employeeId;
   if (!empId) {
     res.status(400).json({ error: 'No employee profile linked.' });
     return;
   }
-  db.prepare(
-    `INSERT OR REPLACE INTO policy_acknowledgements (policy_id, employee_id, acknowledged_at)
-     VALUES (?, ?, ?)`
-  ).run(policyId, empId, new Date().toISOString());
-  recordAuditLog({
+  await db
+    .prepare(
+      `INSERT INTO policy_acknowledgements (policy_id, employee_id, acknowledged_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT (policy_id, employee_id) DO UPDATE SET acknowledged_at = excluded.acknowledged_at`
+    )
+    .run(policyId, empId, new Date().toISOString());
+  await recordAuditLog({
     user: req.user,
     action: 'policy.acknowledged',
     resource: 'company_policies',
@@ -181,14 +182,14 @@ opsRouter.post('/expenses', requirePermission('ops.self'), async (req: AuthedReq
   }
   const empId = req.user!.employeeId ?? 1;
   const branchId = req.user!.branchId ?? 1;
-  const rules = loadWorkflowRules();
+  const rules = await loadWorkflowRules();
   const resolved = evaluateWorkflowRules(rules, {
     triggerEvent: 'expense.submitted',
     branchId,
     amount: parsed.data.amount,
   });
 
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO expenses (employee_id, branch_id, category, amount, claim_date, description, status, approval_chain_json, current_step, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?)`
@@ -205,7 +206,7 @@ opsRouter.post('/expenses', requirePermission('ops.self'), async (req: AuthedReq
     );
 
   const expId = Number(info.lastInsertRowid);
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'expense.submitted',
     resource: 'expenses',
@@ -227,24 +228,24 @@ opsRouter.post('/expenses/:id/decision', requirePermission('ops.manage'), async 
     res.status(400).json({ error: 'Invalid decision.' });
     return;
   }
-  const row = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id) as
-    | { id: number; amount: number; approval_chain_json: string; current_step: number; status: string }
-    | undefined;
+  const row = await db
+    .prepare('SELECT * FROM expenses WHERE id = ?')
+    .get<{ id: number; amount: number; approval_chain_json: string; current_step: number; status: string }>(id);
   if (!row || row.status !== 'pending') {
     res.status(404).json({ error: 'Pending expense not found.' });
     return;
   }
   if (parsed.data.decision === 'reject') {
-    db.prepare("UPDATE expenses SET status = 'rejected' WHERE id = ?").run(id);
-    recordAuditLog({ user: req.user, action: 'expense.rejected', resource: 'expenses', resourceId: id, ipAddress: req.ip });
+    await db.prepare("UPDATE expenses SET status = 'rejected' WHERE id = ?").run(id);
+    await recordAuditLog({ user: req.user, action: 'expense.rejected', resource: 'expenses', resourceId: id, ipAddress: req.ip });
     res.json({ ok: true, status: 'rejected' });
     return;
   }
   const chain = JSON.parse(row.approval_chain_json) as string[];
   const nextStep = req.user!.roles.includes('super_admin') ? chain.length : row.current_step + 1;
   const finalStatus = nextStep >= chain.length ? 'approved' : 'pending';
-  db.prepare('UPDATE expenses SET status = ?, current_step = ? WHERE id = ?').run(finalStatus, nextStep, id);
-  recordAuditLog({
+  await db.prepare('UPDATE expenses SET status = ?, current_step = ? WHERE id = ?').run(finalStatus, nextStep, id);
+  await recordAuditLog({
     user: req.user,
     action: finalStatus === 'approved' ? 'expense.approved' : 'expense.step_approved',
     resource: 'expenses',
@@ -259,7 +260,7 @@ opsRouter.post('/expenses/:id/decision', requirePermission('ops.manage'), async 
 });
 
 // Loans
-opsRouter.post('/loans', requirePermission('ops.self'), (req: AuthedRequest, res) => {
+opsRouter.post('/loans', requirePermission('ops.self'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     principalAmount: z.number().min(200).max(25000),
     termMonths: z.number().int().min(3).max(36),
@@ -274,7 +275,7 @@ opsRouter.post('/loans', requirePermission('ops.self'), (req: AuthedRequest, res
   const rate = 3.0;
   const totalRepayable = Math.round(parsed.data.principalAmount * (1 + (rate / 100) * (parsed.data.termMonths / 12)) * 100) / 100;
   const monthly = Math.round((totalRepayable / parsed.data.termMonths) * 100) / 100;
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO loans (employee_id, principal_amount, interest_rate, term_months, monthly_installment, remaining_balance, purpose, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
@@ -283,15 +284,15 @@ opsRouter.post('/loans', requirePermission('ops.self'), (req: AuthedRequest, res
   res.status(201).json({ id: Number(info.lastInsertRowid) });
 });
 
-opsRouter.post('/loans/:id/approve', requirePermission('ops.manage'), (req: AuthedRequest, res) => {
+opsRouter.post('/loans/:id/approve', requirePermission('ops.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  db.prepare("UPDATE loans SET status = 'active' WHERE id = ? AND status = 'pending'").run(id);
-  recordAuditLog({ user: req.user, action: 'loan.approved', resource: 'loans', resourceId: id, ipAddress: req.ip });
+  await db.prepare("UPDATE loans SET status = 'active' WHERE id = ? AND status = 'pending'").run(id);
+  await recordAuditLog({ user: req.user, action: 'loan.approved', resource: 'loans', resourceId: id, ipAddress: req.ip });
   res.json({ ok: true });
 });
 
 // Help Desk Tickets & Comments
-opsRouter.post('/tickets', requirePermission('ops.self'), (req: AuthedRequest, res) => {
+opsRouter.post('/tickets', requirePermission('ops.self'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     department: z.enum(['Payroll', 'IT & Security', 'Benefits', 'People Ops']),
     subject: z.string().min(4).max(160),
@@ -305,7 +306,7 @@ opsRouter.post('/tickets', requirePermission('ops.self'), (req: AuthedRequest, r
   }
   const num = `HD-2026-${Math.floor(200 + Math.random() * 799)}`;
   const empId = req.user!.employeeId ?? 1;
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO tickets (ticket_number, employee_id, department, subject, description, priority, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 'open', ?)`
@@ -314,14 +315,14 @@ opsRouter.post('/tickets', requirePermission('ops.self'), (req: AuthedRequest, r
   res.status(201).json({ id: Number(info.lastInsertRowid), ticketNumber: num });
 });
 
-opsRouter.get('/tickets/:id/comments', (req, res) => {
-  const comments = db
+opsRouter.get('/tickets/:id/comments', async (req, res) => {
+  const comments = await db
     .prepare('SELECT * FROM ticket_comments WHERE ticket_id = ? ORDER BY id ASC')
     .all(Number(req.params.id));
   res.json({ comments });
 });
 
-opsRouter.post('/tickets/:id/comments', (req: AuthedRequest, res) => {
+opsRouter.post('/tickets/:id/comments', async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
   const schema = z.object({ comment: z.string().min(2).max(800), status: z.enum(['open', 'in_progress', 'resolved']).optional() });
   const parsed = schema.safeParse(req.body);
@@ -329,14 +330,11 @@ opsRouter.post('/tickets/:id/comments', (req: AuthedRequest, res) => {
     res.status(400).json({ error: 'Comment cannot be empty.' });
     return;
   }
-  db.prepare('INSERT INTO ticket_comments (ticket_id, author_name, comment, created_at) VALUES (?, ?, ?, ?)').run(
-    id,
-    req.user!.fullName,
-    parsed.data.comment,
-    new Date().toISOString()
-  );
+  await db
+    .prepare('INSERT INTO ticket_comments (ticket_id, author_name, comment, created_at) VALUES (?, ?, ?, ?)')
+    .run(id, req.user!.fullName, parsed.data.comment, new Date().toISOString());
   if (parsed.data.status) {
-    db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(parsed.data.status, id);
+    await db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(parsed.data.status, id);
   }
   res.status(201).json({ ok: true });
 });
@@ -344,24 +342,29 @@ opsRouter.post('/tickets/:id/comments', (req: AuthedRequest, res) => {
 // ---------------------------------------------------------------------------
 // Executive Analytics Workbench & Custom Approval Workflow Builder
 // ---------------------------------------------------------------------------
-opsRouter.get('/analytics', requirePermission('analytics.view'), (req, res) => {
+opsRouter.get('/analytics', requirePermission('analytics.view'), async (req, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
   const branchWhere = branchId ? 'AND e.branch_id = ?' : '';
   const params = branchId ? [branchId] : [];
 
-  const branchMetrics = db
+  const branchMetricsRaw = await db
     .prepare(
       `SELECT b.id, b.name, b.code, b.city, b.state_tax_rate,
               COUNT(e.id) as headcount,
-              ROUND(AVG(e.annual_salary), 0) as avg_salary,
+              AVG(e.annual_salary) as avg_salary,
               COALESCE(SUM(e.annual_salary), 0) as total_annual_comp
        FROM branches b
        LEFT JOIN employees e ON e.branch_id = b.id AND e.status = 'active'
        GROUP BY b.id ORDER BY total_annual_comp DESC`
     )
-    .all();
+    .all<Record<string, unknown>>();
 
-  const departmentCost = db
+  const branchMetrics = branchMetricsRaw.map((r) => ({
+    ...r,
+    avg_salary: r.avg_salary ? Math.round(Number(r.avg_salary)) : 0,
+  }));
+
+  const departmentCost = await db
     .prepare(
       `SELECT d.name, b.code as branch_code, COUNT(e.id) as headcount,
               COALESCE(SUM(e.annual_salary), 0) as annual_comp, d.budget
@@ -369,11 +372,11 @@ opsRouter.get('/analytics', requirePermission('analytics.view'), (req, res) => {
        JOIN branches b ON b.id = d.branch_id
        LEFT JOIN employees e ON e.department_id = d.id AND e.status = 'active'
        ${branchId ? 'WHERE d.branch_id = ?' : ''}
-       GROUP BY d.id ORDER BY annual_comp DESC`
+       GROUP BY d.id, b.id ORDER BY annual_comp DESC`
     )
     .all(...params);
 
-  const salaryBands = db
+  const salaryBands = await db
     .prepare(
       `SELECT
          CASE
@@ -388,16 +391,22 @@ opsRouter.get('/analytics', requirePermission('analytics.view'), (req, res) => {
     )
     .all(...params);
 
-  const overtimeByBranch = db
+  const overtimeRaw = await db
     .prepare(
-      `SELECT b.name as branch_name, ROUND(SUM(a.worked_hours), 1) as worked_hours,
-              ROUND(SUM(a.overtime_hours), 1) as overtime_hours
+      `SELECT b.name as branch_name, COALESCE(SUM(a.worked_hours), 0) as worked_hours,
+              COALESCE(SUM(a.overtime_hours), 0) as overtime_hours
        FROM attendances a JOIN branches b ON b.id = a.branch_id
        GROUP BY b.id`
     )
-    .all();
+    .all<{ branch_name: string; worked_hours: number; overtime_hours: number }>();
 
-  const leaveByType = db
+  const overtimeByBranch = overtimeRaw.map((r) => ({
+    branch_name: r.branch_name,
+    worked_hours: Math.round(Number(r.worked_hours) * 10) / 10,
+    overtime_hours: Math.round(Number(r.overtime_hours) * 10) / 10,
+  }));
+
+  const leaveByType = await db
     .prepare(
       `SELECT leave_type, COUNT(*) as requests, COALESCE(SUM(days), 0) as total_days
        FROM leave_requests GROUP BY leave_type`
@@ -405,11 +414,11 @@ opsRouter.get('/analytics', requirePermission('analytics.view'), (req, res) => {
     .all();
 
   const complianceSummary = {
-    totalPolicies: (db.prepare('SELECT COUNT(*) as c FROM company_policies').get() as { c: number }).c,
-    totalAcks: (db.prepare('SELECT COUNT(*) as c FROM policy_acknowledgements').get() as { c: number }).c,
-    activeEmployees: (db.prepare("SELECT COUNT(*) as c FROM employees WHERE status = 'active'").get() as { c: number }).c,
-    mfaEnrolled: (db.prepare('SELECT COUNT(*) as c FROM users WHERE mfa_enabled = 1').get() as { c: number }).c,
-    totalUsers: (db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c,
+    totalPolicies: (await db.prepare('SELECT COUNT(*) as c FROM company_policies').get<{ c: number }>())?.c ?? 0,
+    totalAcks: (await db.prepare('SELECT COUNT(*) as c FROM policy_acknowledgements').get<{ c: number }>())?.c ?? 0,
+    activeEmployees: (await db.prepare("SELECT COUNT(*) as c FROM employees WHERE status = 'active'").get<{ c: number }>())?.c ?? 0,
+    mfaEnrolled: (await db.prepare('SELECT COUNT(*) as c FROM users WHERE mfa_enabled = 1').get<{ c: number }>())?.c ?? 0,
+    totalUsers: (await db.prepare('SELECT COUNT(*) as c FROM users').get<{ c: number }>())?.c ?? 0,
   };
 
   res.json({
@@ -422,8 +431,8 @@ opsRouter.get('/analytics', requirePermission('analytics.view'), (req, res) => {
   });
 });
 
-opsRouter.get('/analytics/export', requirePermission('analytics.view'), (_req, res) => {
-  const rows = db
+opsRouter.get('/analytics/export', requirePermission('analytics.view'), async (_req, res) => {
+  const rows = await db
     .prepare(
       `SELECT e.employee_code, e.full_name, e.designation, b.name as branch, b.cost_center,
               d.name as department, e.hire_date, e.annual_salary, e.status
@@ -432,7 +441,7 @@ opsRouter.get('/analytics/export', requirePermission('analytics.view'), (_req, r
        JOIN departments d ON d.id = e.department_id
        ORDER BY e.employee_code ASC`
     )
-    .all() as Array<Record<string, unknown>>;
+    .all<Record<string, unknown>>();
 
   let csv = 'EmployeeCode,FullName,Designation,Branch,CostCenter,Department,HireDate,AnnualSalaryUSD,Status\n';
   for (const r of rows) {
@@ -444,8 +453,8 @@ opsRouter.get('/analytics/export', requirePermission('analytics.view'), (_req, r
 });
 
 // Custom Workflow Rules CRUD
-opsRouter.get('/workflows', (_req, res) => {
-  const rules = db
+opsRouter.get('/workflows', async (_req, res) => {
+  const rules = await db
     .prepare(
       `SELECT wr.*, b.name as branch_name
        FROM workflow_rules wr LEFT JOIN branches b ON b.id = wr.branch_id
@@ -455,7 +464,7 @@ opsRouter.get('/workflows', (_req, res) => {
   res.json({ rules });
 });
 
-opsRouter.post('/workflows', requirePermission('workflows.manage'), (req: AuthedRequest, res) => {
+opsRouter.post('/workflows', requirePermission('workflows.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     name: z.string().min(3).max(120),
     triggerEvent: z.enum(['leave.submitted', 'expense.submitted', 'loan.submitted', 'employee.hired', 'payroll.ready']),
@@ -472,7 +481,7 @@ opsRouter.post('/workflows', requirePermission('workflows.manage'), (req: Authed
     return;
   }
   const d = parsed.data;
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO workflow_rules (name, trigger_event, branch_id, condition_field, condition_operator, condition_value, approver_roles_json, webhook_event, is_active, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
@@ -488,7 +497,7 @@ opsRouter.post('/workflows', requirePermission('workflows.manage'), (req: Authed
       d.webhookEvent ?? null,
       new Date().toISOString()
     );
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'workflow.rule_created',
     resource: 'workflow_rules',
@@ -499,18 +508,18 @@ opsRouter.post('/workflows', requirePermission('workflows.manage'), (req: Authed
   res.status(201).json({ id: Number(info.lastInsertRowid) });
 });
 
-opsRouter.patch('/workflows/:id/toggle', requirePermission('workflows.manage'), (req: AuthedRequest, res) => {
+opsRouter.patch('/workflows/:id/toggle', requirePermission('workflows.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  const row = db.prepare('SELECT is_active, name FROM workflow_rules WHERE id = ?').get(id) as
-    | { is_active: number; name: string }
-    | undefined;
+  const row = await db
+    .prepare('SELECT is_active, name FROM workflow_rules WHERE id = ?')
+    .get<{ is_active: number; name: string }>(id);
   if (!row) {
     res.status(404).json({ error: 'Workflow rule not found.' });
     return;
   }
   const next = row.is_active ? 0 : 1;
-  db.prepare('UPDATE workflow_rules SET is_active = ? WHERE id = ?').run(next, id);
-  recordAuditLog({
+  await db.prepare('UPDATE workflow_rules SET is_active = ? WHERE id = ?').run(next, id);
+  await recordAuditLog({
     user: req.user,
     action: 'workflow.rule_toggled',
     resource: 'workflow_rules',
@@ -522,14 +531,14 @@ opsRouter.patch('/workflows/:id/toggle', requirePermission('workflows.manage'), 
 });
 
 // Notifications
-opsRouter.get('/notifications', (req: AuthedRequest, res) => {
-  const rows = db
+opsRouter.get('/notifications', async (req: AuthedRequest, res) => {
+  const rows = await db
     .prepare('SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 20')
     .all(req.user!.id);
   res.json({ notifications: rows });
 });
 
-opsRouter.post('/notifications/read-all', (req: AuthedRequest, res) => {
-  db.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ?').run(req.user!.id);
+opsRouter.post('/notifications/read-all', async (req: AuthedRequest, res) => {
+  await db.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ?').run(req.user!.id);
   res.json({ ok: true });
 });

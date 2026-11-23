@@ -19,8 +19,8 @@ export async function dispatchWebhookEvent(
 ): Promise<WebhookDispatchResult[]> {
   const rows = (
     options.webhookId
-      ? db.prepare('SELECT * FROM webhooks WHERE id = ?').all(options.webhookId)
-      : db.prepare('SELECT * FROM webhooks WHERE is_active = 1').all()
+      ? await db.prepare('SELECT * FROM webhooks WHERE id = ?').all(options.webhookId)
+      : await db.prepare('SELECT * FROM webhooks WHERE is_active = 1').all()
   ) as Array<{
     id: number;
     name: string;
@@ -89,10 +89,12 @@ export async function dispatchWebhookEvent(
       }
     }
 
-    db.prepare(
-      `INSERT INTO webhook_deliveries (webhook_id, event_name, payload_json, signature_header, http_status, latency_ms, delivery_mode, response_summary, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(wh.id, eventName, payloadJson, signatureHeader, httpStatus, latencyMs, deliveryMode, responseSummary, new Date().toISOString());
+    await db
+      .prepare(
+        `INSERT INTO webhook_deliveries (webhook_id, event_name, payload_json, signature_header, http_status, latency_ms, delivery_mode, response_summary, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(wh.id, eventName, payloadJson, signatureHeader, httpStatus, latencyMs, deliveryMode, responseSummary, new Date().toISOString());
 
     results.push({
       webhookId: wh.id,

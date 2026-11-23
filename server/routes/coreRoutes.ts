@@ -11,18 +11,19 @@ coreRouter.use(requireAuth);
 // ---------------------------------------------------------------------------
 // Role-Adaptive & Multi-Branch Dashboard Aggregates
 // ---------------------------------------------------------------------------
-coreRouter.get('/dashboard', (req: AuthedRequest, res) => {
+coreRouter.get('/dashboard', async (req: AuthedRequest, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
   const branchFilter = branchId ? 'AND branch_id = ?' : '';
   const branchParams = branchId ? [branchId] : [];
 
-  const totalEmployees = (
-    db.prepare(`SELECT COUNT(*) as c FROM employees WHERE status = 'active' ${branchFilter}`).get(...branchParams) as {
-      c: number;
-    }
-  ).c;
+  const totalEmployees =
+    (
+      await db
+        .prepare(`SELECT COUNT(*) as c FROM employees WHERE status = 'active' ${branchFilter}`)
+        .get<{ c: number }>(...branchParams)
+    )?.c ?? 0;
 
-  const branchBreakdown = db
+  const branchBreakdown = await db
     .prepare(
       `SELECT b.id, b.code, b.name, b.city, b.country, b.state_tax_rate,
               COUNT(e.id) as headcount,
@@ -34,109 +35,159 @@ coreRouter.get('/dashboard', (req: AuthedRequest, res) => {
     )
     .all();
 
-  const deptBreakdown = db
+  const deptBreakdown = await db
     .prepare(
       `SELECT d.id, d.name, d.code, b.name as branch_name, COUNT(e.id) as headcount, COALESCE(SUM(e.annual_salary), 0) as annual_cost
        FROM departments d
        JOIN branches b ON b.id = d.branch_id
        LEFT JOIN employees e ON e.department_id = d.id AND e.status = 'active'
        ${branchId ? 'WHERE d.branch_id = ?' : ''}
-       GROUP BY d.id
+       GROUP BY d.id, b.name
        ORDER BY headcount DESC`
     )
     .all(...branchParams);
 
-  const pendingLeaves = (
-    db.prepare(`SELECT COUNT(*) as c FROM leave_requests WHERE status = 'pending' ${branchFilter}`).get(...branchParams) as {
-      c: number;
-    }
-  ).c;
+  const pendingLeaves =
+    (
+      await db
+        .prepare(`SELECT COUNT(*) as c FROM leave_requests WHERE status = 'pending' ${branchFilter}`)
+        .get<{ c: number }>(...branchParams)
+    )?.c ?? 0;
 
-  const pendingExpenses = (
-    db.prepare(`SELECT COUNT(*) as c FROM expenses WHERE status = 'pending' ${branchFilter}`).get(...branchParams) as {
-      c: number;
-    }
-  ).c;
+  const pendingExpenses =
+    (
+      await db
+        .prepare(`SELECT COUNT(*) as c FROM expenses WHERE status = 'pending' ${branchFilter}`)
+        .get<{ c: number }>(...branchParams)
+    )?.c ?? 0;
 
-  const openJobs = (
-    db.prepare(`SELECT COUNT(*) as c FROM job_posts WHERE status = 'open' ${branchFilter}`).get(...branchParams) as {
-      c: number;
-    }
-  ).c;
+  const openJobs =
+    (
+      await db
+        .prepare(`SELECT COUNT(*) as c FROM job_posts WHERE status = 'open' ${branchFilter}`)
+        .get<{ c: number }>(...branchParams)
+    )?.c ?? 0;
 
-  const todayPresent = (
-    db
-      .prepare(
-        `SELECT COUNT(*) as c FROM attendances WHERE work_date = '2026-11-23' ${branchFilter}`
-      )
-      .get(...branchParams) as { c: number }
-  ).c;
+  const todayPresent =
+    (
+      await db
+        .prepare(`SELECT COUNT(*) as c FROM attendances WHERE work_date = '2026-11-23' ${branchFilter}`)
+        .get<{ c: number }>(...branchParams)
+    )?.c ?? 0;
 
-  const latestFinalizedPayroll = db
+  const latestFinalizedPayroll = await db
     .prepare("SELECT * FROM payrolls WHERE status = 'finalized' ORDER BY id DESC LIMIT 1")
     .get();
 
-  const draftPayroll = db
+  const draftPayroll = await db
     .prepare("SELECT * FROM payrolls WHERE status IN ('draft', 'simulated', 'approved') ORDER BY id DESC LIMIT 1")
     .get();
 
+  const leaveApprovalRows = await db
+    .prepare(
+      `SELECT l.id, e.full_name as employee_name, b.name as branch_name,
+              l.leave_type, l.days, l.start_date as ref_date,
+              l.approval_chain_json, l.current_step, l.created_at
+       FROM leave_requests l
+       JOIN employees e ON e.id = l.employee_id
+       JOIN branches b ON b.id = l.branch_id
+       WHERE l.status = 'pending' ${branchId ? 'AND l.branch_id = ?' : ''}
+       ORDER BY l.id DESC LIMIT 6`
+    )
+    .all<{
+      id: number;
+      employee_name: string;
+      branch_name: string;
+      leave_type: string;
+      days: number;
+      ref_date: string;
+      approval_chain_json: string;
+      current_step: number;
+      created_at: string;
+    }>(...branchParams);
+
+  const expenseApprovalRows = await db
+    .prepare(
+      `SELECT x.id, e.full_name as employee_name, b.name as branch_name,
+              x.category, x.amount, x.claim_date as ref_date,
+              x.approval_chain_json, x.current_step, x.created_at
+       FROM expenses x
+       JOIN employees e ON e.id = x.employee_id
+       JOIN branches b ON b.id = x.branch_id
+       WHERE x.status = 'pending' ${branchId ? 'AND x.branch_id = ?' : ''}
+       ORDER BY x.id DESC LIMIT 6`
+    )
+    .all<{
+      id: number;
+      employee_name: string;
+      branch_name: string;
+      category: string;
+      amount: number;
+      ref_date: string;
+      approval_chain_json: string;
+      current_step: number;
+      created_at: string;
+    }>(...branchParams);
+
   const pendingApprovals = [
-    ...(db
-      .prepare(
-        `SELECT l.id, 'leave' as kind, e.full_name as employee_name, b.name as branch_name,
-                l.leave_type || ' (' || l.days || 'd)' as summary, l.start_date as ref_date,
-                l.approval_chain_json, l.current_step, l.created_at
-         FROM leave_requests l
-         JOIN employees e ON e.id = l.employee_id
-         JOIN branches b ON b.id = l.branch_id
-         WHERE l.status = 'pending' ${branchId ? 'AND l.branch_id = ?' : ''}
-         ORDER BY l.id DESC LIMIT 6`
-      )
-      .all(...branchParams) as Array<Record<string, unknown>>),
-    ...(db
-      .prepare(
-        `SELECT x.id, 'expense' as kind, e.full_name as employee_name, b.name as branch_name,
-                x.category || ' ($' || printf('%.2f', x.amount) || ')' as summary, x.claim_date as ref_date,
-                x.approval_chain_json, x.current_step, x.created_at
-         FROM expenses x
-         JOIN employees e ON e.id = x.employee_id
-         JOIN branches b ON b.id = x.branch_id
-         WHERE x.status = 'pending' ${branchId ? 'AND x.branch_id = ?' : ''}
-         ORDER BY x.id DESC LIMIT 6`
-      )
-      .all(...branchParams) as Array<Record<string, unknown>>),
+    ...leaveApprovalRows.map((l) => ({
+      id: l.id,
+      kind: 'leave',
+      employee_name: l.employee_name,
+      branch_name: l.branch_name,
+      summary: `${l.leave_type} (${l.days}d)`,
+      ref_date: l.ref_date,
+      approval_chain_json: l.approval_chain_json,
+      current_step: l.current_step,
+      created_at: l.created_at,
+    })),
+    ...expenseApprovalRows.map((x) => ({
+      id: x.id,
+      kind: 'expense',
+      employee_name: x.employee_name,
+      branch_name: x.branch_name,
+      summary: `${x.category} ($${Number(x.amount).toFixed(2)})`,
+      ref_date: x.ref_date,
+      approval_chain_json: x.approval_chain_json,
+      current_step: x.current_step,
+      created_at: x.created_at,
+    })),
   ];
 
   // Employee self-service summary for logged-in user
   let selfService: Record<string, unknown> | null = null;
   if (req.user?.employeeId) {
-    const todayAtt = db
+    const todayAtt = await db
       .prepare("SELECT * FROM attendances WHERE employee_id = ? AND work_date = '2026-11-23'")
       .get(req.user.employeeId);
-    const usedAnnual = (
-      db
-        .prepare("SELECT COALESCE(SUM(days), 0) as d FROM leave_requests WHERE employee_id = ? AND leave_type = 'annual' AND status = 'approved'")
-        .get(req.user.employeeId) as { d: number }
-    ).d;
-    const latestSlip = db
+    const usedAnnual =
+      (
+        await db
+          .prepare(
+            "SELECT COALESCE(SUM(days), 0) as d FROM leave_requests WHERE employee_id = ? AND leave_type = 'annual' AND status = 'approved'"
+          )
+          .get<{ d: number }>(req.user.employeeId)
+      )?.d ?? 0;
+    const latestSlip = await db
       .prepare(
         `SELECT ps.*, pr.run_code, pr.period_start, pr.period_end
          FROM payslips ps JOIN payrolls pr ON pr.id = ps.payroll_id
          WHERE ps.employee_id = ? ORDER BY ps.id DESC LIMIT 1`
       )
       .get(req.user.employeeId);
-    const openGoals = db
+    const openGoals = await db
       .prepare('SELECT * FROM goals WHERE employee_id = ? ORDER BY id DESC LIMIT 4')
       .all(req.user.employeeId);
-    const unackedPolicies = (
-      db
-        .prepare(
-          `SELECT COUNT(*) as c FROM company_policies cp
-           WHERE cp.requires_acknowledgement = 1
-           AND NOT EXISTS (SELECT 1 FROM policy_acknowledgements pa WHERE pa.policy_id = cp.id AND pa.employee_id = ?)`
-        )
-        .get(req.user.employeeId) as { c: number }
-    ).c;
+    const unackedPolicies =
+      (
+        await db
+          .prepare(
+            `SELECT COUNT(*) as c FROM company_policies cp
+             WHERE cp.requires_acknowledgement = 1
+             AND NOT EXISTS (SELECT 1 FROM policy_acknowledgements pa WHERE pa.policy_id = cp.id AND pa.employee_id = ?)`
+          )
+          .get<{ c: number }>(req.user.employeeId)
+      )?.c ?? 0;
 
     selfService = {
       todayAttendance: todayAtt ?? null,
@@ -148,22 +199,22 @@ coreRouter.get('/dashboard', (req: AuthedRequest, res) => {
     };
   }
 
-  const recentAudit = db
+  const recentAudit = await db
     .prepare('SELECT id, actor_email, action, resource, resource_id, created_at FROM audit_logs ORDER BY id DESC LIMIT 8')
     .all();
 
-  const unreadNotifications = (
-    db
-      .prepare('SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND is_read = 0')
-      .get(req.user!.id) as { c: number }
-  ).c;
+  const unreadNotifications =
+    (
+      await db
+        .prepare('SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND is_read = 0')
+        .get<{ c: number }>(req.user!.id)
+    )?.c ?? 0;
 
-  const mfaEnrolledCount = (
-    db.prepare('SELECT COUNT(*) as c FROM users WHERE mfa_enabled = 1').get() as { c: number }
-  ).c;
-  const totalUsersCount = (db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c;
+  const mfaEnrolledCount =
+    (await db.prepare('SELECT COUNT(*) as c FROM users WHERE mfa_enabled = 1').get<{ c: number }>())?.c ?? 0;
+  const totalUsersCount =
+    (await db.prepare('SELECT COUNT(*) as c FROM users').get<{ c: number }>())?.c ?? 0;
 
-  // 6-month payroll trend for executive visualization
   const payrollTrend = [
     { month: 'Jun', gross: 126400, net: 86200, employerTax: 9670 },
     { month: 'Jul', gross: 129800, net: 88100, employerTax: 9930 },
@@ -204,8 +255,8 @@ coreRouter.get('/dashboard', (req: AuthedRequest, res) => {
 // ---------------------------------------------------------------------------
 // Branches & Departments
 // ---------------------------------------------------------------------------
-coreRouter.get('/branches', (_req, res) => {
-  const branches = db
+coreRouter.get('/branches', async (_req, res) => {
+  const branches = await db
     .prepare(
       `SELECT b.*, COUNT(e.id) as headcount, COALESCE(SUM(e.annual_salary), 0) as annual_payroll
        FROM branches b
@@ -216,7 +267,7 @@ coreRouter.get('/branches', (_req, res) => {
   res.json({ branches });
 });
 
-coreRouter.post('/branches', requirePermission('branches.manage'), (req: AuthedRequest, res) => {
+coreRouter.post('/branches', requirePermission('branches.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     code: z.string().min(2).max(20),
     name: z.string().min(2).max(100),
@@ -233,14 +284,14 @@ coreRouter.post('/branches', requirePermission('branches.manage'), (req: AuthedR
   }
   const d = parsed.data;
   try {
-    const info = db
+    const info = await db
       .prepare(
         `INSERT INTO branches (code, name, city, country, timezone, currency_code, state_tax_rate, cost_center, is_headquarters, status, created_at)
          VALUES (?, ?, ?, ?, ?, 'USD', ?, ?, 0, 'active', ?)`
       )
       .run(d.code.toUpperCase(), d.name, d.city, d.country, d.timezone, d.stateTaxRate, d.costCenter.toUpperCase(), new Date().toISOString());
 
-    recordAuditLog({
+    await recordAuditLog({
       user: req.user,
       action: 'branch.created',
       resource: 'branches',
@@ -254,9 +305,9 @@ coreRouter.post('/branches', requirePermission('branches.manage'), (req: AuthedR
   }
 });
 
-coreRouter.get('/departments', (req, res) => {
+coreRouter.get('/departments', async (req, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT d.*, b.name as branch_name, b.code as branch_code,
               m.full_name as manager_name, COUNT(e.id) as headcount
@@ -265,13 +316,13 @@ coreRouter.get('/departments', (req, res) => {
        LEFT JOIN employees m ON m.id = d.manager_employee_id
        LEFT JOIN employees e ON e.department_id = d.id AND e.status = 'active'
        ${branchId ? 'WHERE d.branch_id = ?' : ''}
-       GROUP BY d.id ORDER BY b.name, d.name`
+       GROUP BY d.id, b.id, m.id ORDER BY b.name, d.name`
     )
     .all(...(branchId ? [branchId] : []));
   res.json({ departments: rows });
 });
 
-coreRouter.post('/departments', requirePermission('branches.manage'), (req: AuthedRequest, res) => {
+coreRouter.post('/departments', requirePermission('branches.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     branchId: z.number().int().positive(),
     name: z.string().min(2).max(100),
@@ -284,10 +335,10 @@ coreRouter.post('/departments', requirePermission('branches.manage'), (req: Auth
     return;
   }
   const d = parsed.data;
-  const info = db
+  const info = await db
     .prepare('INSERT INTO departments (branch_id, name, code, budget, created_at) VALUES (?, ?, ?, ?, ?)')
     .run(d.branchId, d.name, d.code.toUpperCase(), d.budget, new Date().toISOString());
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'department.created',
     resource: 'departments',
@@ -301,12 +352,12 @@ coreRouter.post('/departments', requirePermission('branches.manage'), (req: Auth
 // ---------------------------------------------------------------------------
 // Employees Directory, Detail Drawer, CRUD & Org Chart
 // ---------------------------------------------------------------------------
-coreRouter.get('/employees', requirePermission('employees.view'), (req: AuthedRequest, res) => {
+coreRouter.get('/employees', requirePermission('employees.view'), async (req: AuthedRequest, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
   const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : '';
   const status = typeof req.query.status === 'string' ? req.query.status : '';
 
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT e.*, b.name as branch_name, b.code as branch_code, b.city as branch_city,
               d.name as department_name, m.full_name as manager_name
@@ -317,7 +368,7 @@ coreRouter.get('/employees', requirePermission('employees.view'), (req: AuthedRe
        ${branchId ? 'WHERE e.branch_id = ?' : ''}
        ORDER BY e.employee_code ASC`
     )
-    .all(...(branchId ? [branchId] : [])) as Array<Record<string, unknown>>;
+    .all<Record<string, unknown>>(...(branchId ? [branchId] : []));
 
   const canSeeSalary =
     req.user!.roles.includes('super_admin') ||
@@ -343,9 +394,9 @@ coreRouter.get('/employees', requirePermission('employees.view'), (req: AuthedRe
   res.json({ employees: filtered });
 });
 
-coreRouter.get('/employees/:id', requirePermission('employees.view'), (req: AuthedRequest, res) => {
+coreRouter.get('/employees/:id', requirePermission('employees.view'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  const emp = db
+  const emp = await db
     .prepare(
       `SELECT e.*, b.name as branch_name, b.city as branch_city, b.timezone, b.state_tax_rate,
               d.name as department_name, m.full_name as manager_name
@@ -355,29 +406,29 @@ coreRouter.get('/employees/:id', requirePermission('employees.view'), (req: Auth
        LEFT JOIN employees m ON m.id = e.manager_id
        WHERE e.id = ?`
     )
-    .get(id) as Record<string, unknown> | undefined;
+    .get<Record<string, unknown>>(id);
 
   if (!emp) {
     res.status(404).json({ error: 'Employee not found.' });
     return;
   }
 
-  const payslips = db
+  const payslips = await db
     .prepare(
       `SELECT ps.*, pr.run_code, pr.period_start, pr.period_end, pr.status as payroll_status
        FROM payslips ps JOIN payrolls pr ON pr.id = ps.payroll_id
        WHERE ps.employee_id = ? ORDER BY ps.id DESC LIMIT 6`
     )
     .all(id);
-  const enrollments = db
+  const enrollments = await db
     .prepare(
       `SELECT be.*, b.name as benefit_name, b.category, b.provider, b.tax_treatment, b.employee_monthly_cost, b.employer_monthly_cost
        FROM benefit_enrollments be JOIN benefits b ON b.id = be.benefit_id
        WHERE be.employee_id = ?`
     )
     .all(id);
-  const assets = db.prepare('SELECT * FROM assets WHERE assigned_employee_id = ?').all(id);
-  const directReports = db
+  const assets = await db.prepare('SELECT * FROM assets WHERE assigned_employee_id = ?').all(id);
+  const directReports = await db
     .prepare('SELECT id, employee_code, full_name, designation, status FROM employees WHERE manager_id = ?')
     .all(id);
 
@@ -421,12 +472,13 @@ coreRouter.post('/employees', requirePermission('employees.manage'), async (req:
   }
 
   const d = parsed.data;
-  const maxId = (db.prepare('SELECT COALESCE(MAX(id), 1000) as m FROM employees').get() as { m: number }).m;
+  const maxRow = await db.prepare('SELECT COALESCE(MAX(id), 1000) as m FROM employees').get<{ m: number }>();
+  const maxId = Number(maxRow?.m ?? 1000);
   const employeeCode = `NX-${1001 + maxId}`;
   const now = new Date().toISOString();
 
   try {
-    const info = db
+    const info = await db
       .prepare(
         `INSERT INTO employees (
           branch_id, department_id, manager_id, employee_code, full_name, email, phone,
@@ -450,16 +502,15 @@ coreRouter.post('/employees', requirePermission('employees.manage'), async (req:
       );
     const newId = Number(info.lastInsertRowid);
 
-    // Auto-create standard enterprise onboarding tasks
     const due = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
     const insertTask = db.prepare(
       'INSERT INTO onboarding_tasks (employee_id, title, owner_role, due_date, is_completed) VALUES (?, ?, ?, ?, 0)'
     );
-    insertTask.run(newId, 'Verify Government ID & Tax Withholding Forms', 'hr_admin', due);
-    insertTask.run(newId, 'Allocate Workstation Asset & Provision MFA Security Key', 'it_ops', due);
-    insertTask.run(newId, 'Acknowledge Information Security & Code of Ethics Policies', 'employee', due);
+    await insertTask.run(newId, 'Verify Government ID & Tax Withholding Forms', 'hr_admin', due);
+    await insertTask.run(newId, 'Allocate Workstation Asset & Provision MFA Security Key', 'it_ops', due);
+    await insertTask.run(newId, 'Acknowledge Information Security & Code of Ethics Policies', 'employee', due);
 
-    recordAuditLog({
+    await recordAuditLog({
       user: req.user,
       action: 'employee.hired',
       resource: 'employees',
@@ -468,8 +519,7 @@ coreRouter.post('/employees', requirePermission('employees.manage'), async (req:
       ipAddress: req.ip,
     });
 
-    // Evaluate custom workflows & dispatch webhooks
-    const rules = loadWorkflowRules();
+    const rules = await loadWorkflowRules();
     const resolved = evaluateWorkflowRules(rules, { triggerEvent: 'employee.hired', branchId: d.branchId });
     for (const evt of resolved.webhookEvents) {
       await dispatchWebhookEvent(evt, { employeeId: newId, employeeCode, fullName: d.fullName, branchId: d.branchId });
@@ -481,9 +531,9 @@ coreRouter.post('/employees', requirePermission('employees.manage'), async (req:
   }
 });
 
-coreRouter.put('/employees/:id', requirePermission('employees.manage'), (req: AuthedRequest, res) => {
+coreRouter.put('/employees/:id', requirePermission('employees.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  const existing = db.prepare('SELECT * FROM employees WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const existing = await db.prepare('SELECT * FROM employees WHERE id = ?').get<Record<string, unknown>>(id);
   if (!existing) {
     res.status(404).json({ error: 'Employee not found.' });
     return;
@@ -506,22 +556,24 @@ coreRouter.put('/employees/:id', requirePermission('employees.manage'), (req: Au
   const u = parsed.data;
   const termDate = u.status === 'terminated' ? new Date().toISOString().slice(0, 10) : (existing.termination_date as string | null);
 
-  db.prepare(
-    `UPDATE employees
-     SET designation = ?, branch_id = ?, department_id = ?, annual_salary = ?, status = ?, pre_tax_401k_pct = ?, termination_date = ?
-     WHERE id = ?`
-  ).run(
-    u.designation ?? String(existing.designation),
-    u.branchId ?? Number(existing.branch_id),
-    u.departmentId ?? Number(existing.department_id),
-    u.annualSalary ?? Number(existing.annual_salary),
-    u.status ?? String(existing.status),
-    u.preTax401kPct ?? Number(existing.pre_tax_401k_pct),
-    termDate,
-    id
-  );
+  await db
+    .prepare(
+      `UPDATE employees
+       SET designation = ?, branch_id = ?, department_id = ?, annual_salary = ?, status = ?, pre_tax_401k_pct = ?, termination_date = ?
+       WHERE id = ?`
+    )
+    .run(
+      u.designation ?? String(existing.designation),
+      u.branchId ?? Number(existing.branch_id),
+      u.departmentId ?? Number(existing.department_id),
+      u.annualSalary ?? Number(existing.annual_salary),
+      u.status ?? String(existing.status),
+      u.preTax401kPct ?? Number(existing.pre_tax_401k_pct),
+      termDate,
+      id
+    );
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: u.annualSalary && u.annualSalary !== existing.annual_salary ? 'employee.salary_changed' : 'employee.updated',
     resource: 'employees',
@@ -535,8 +587,8 @@ coreRouter.put('/employees/:id', requirePermission('employees.manage'), (req: Au
 });
 
 // Org Chart Tree
-coreRouter.get('/org-chart', (_req, res) => {
-  const nodes = db
+coreRouter.get('/org-chart', async (_req, res) => {
+  const nodes = await db
     .prepare(
       `SELECT e.id, e.employee_code, e.full_name, e.designation, e.manager_id, e.avatar_url, e.status,
               b.name as branch_name, b.code as branch_code, d.name as department_name
@@ -553,9 +605,9 @@ coreRouter.get('/org-chart', (_req, res) => {
 // ---------------------------------------------------------------------------
 // Onboarding & Exit Offboarding Clearances
 // ---------------------------------------------------------------------------
-coreRouter.get('/lifecycle', (req, res) => {
+coreRouter.get('/lifecycle', async (req, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
-  const onboarding = db
+  const onboarding = await db
     .prepare(
       `SELECT t.*, e.full_name as employee_name, e.employee_code, e.hire_date, b.name as branch_name
        FROM onboarding_tasks t
@@ -566,7 +618,7 @@ coreRouter.get('/lifecycle', (req, res) => {
     )
     .all(...(branchId ? [branchId] : []));
 
-  const exits = db
+  const exits = await db
     .prepare(
       `SELECT x.*, e.full_name as employee_name, e.employee_code, e.designation, b.name as branch_name
        FROM exit_requests x
@@ -580,16 +632,18 @@ coreRouter.get('/lifecycle', (req, res) => {
   res.json({ onboarding, exits });
 });
 
-coreRouter.post('/onboarding/:id/toggle', requirePermission('employees.manage'), (req: AuthedRequest, res) => {
+coreRouter.post('/onboarding/:id/toggle', requirePermission('employees.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  const task = db.prepare('SELECT * FROM onboarding_tasks WHERE id = ?').get(id) as { is_completed: number; title: string } | undefined;
+  const task = await db
+    .prepare('SELECT * FROM onboarding_tasks WHERE id = ?')
+    .get<{ is_completed: number; title: string }>(id);
   if (!task) {
     res.status(404).json({ error: 'Onboarding task not found.' });
     return;
   }
   const next = task.is_completed ? 0 : 1;
-  db.prepare('UPDATE onboarding_tasks SET is_completed = ? WHERE id = ?').run(next, id);
-  recordAuditLog({
+  await db.prepare('UPDATE onboarding_tasks SET is_completed = ? WHERE id = ?').run(next, id);
+  await recordAuditLog({
     user: req.user,
     action: 'onboarding.task_toggled',
     resource: 'onboarding_tasks',
@@ -600,7 +654,7 @@ coreRouter.post('/onboarding/:id/toggle', requirePermission('employees.manage'),
   res.json({ ok: true, isCompleted: Boolean(next) });
 });
 
-coreRouter.post('/exits', requirePermission('employees.manage'), (req: AuthedRequest, res) => {
+coreRouter.post('/exits', requirePermission('employees.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     employeeId: z.number().int().positive(),
     lastWorkingDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -611,13 +665,13 @@ coreRouter.post('/exits', requirePermission('employees.manage'), (req: AuthedReq
     res.status(400).json({ error: 'Invalid exit request data.' });
     return;
   }
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO exit_requests (employee_id, last_working_day, reason, status, created_at)
        VALUES (?, ?, ?, 'in_clearance', ?)`
     )
     .run(parsed.data.employeeId, parsed.data.lastWorkingDay, parsed.data.reason, new Date().toISOString());
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'exit.initiated',
     resource: 'exit_requests',
@@ -628,7 +682,7 @@ coreRouter.post('/exits', requirePermission('employees.manage'), (req: AuthedReq
   res.status(201).json({ id: Number(info.lastInsertRowid) });
 });
 
-coreRouter.post('/exits/:id/clear', requirePermission('employees.manage'), (req: AuthedRequest, res) => {
+coreRouter.post('/exits/:id/clear', requirePermission('employees.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
   const schema = z.object({ department: z.enum(['it', 'finance', 'hr']) });
   const parsed = schema.safeParse(req.body);
@@ -637,14 +691,14 @@ coreRouter.post('/exits/:id/clear', requirePermission('employees.manage'), (req:
     return;
   }
   const col = parsed.data.department === 'it' ? 'it_cleared' : parsed.data.department === 'finance' ? 'finance_cleared' : 'hr_cleared';
-  db.prepare(`UPDATE exit_requests SET ${col} = 1 WHERE id = ?`).run(id);
-  const row = db.prepare('SELECT * FROM exit_requests WHERE id = ?').get(id) as
-    | { it_cleared: number; finance_cleared: number; hr_cleared: number }
-    | undefined;
+  await db.prepare(`UPDATE exit_requests SET ${col} = 1 WHERE id = ?`).run(id);
+  const row = await db
+    .prepare('SELECT * FROM exit_requests WHERE id = ?')
+    .get<{ it_cleared: number; finance_cleared: number; hr_cleared: number }>(id);
   if (row && row.it_cleared && row.finance_cleared && row.hr_cleared) {
-    db.prepare("UPDATE exit_requests SET status = 'completed' WHERE id = ?").run(id);
+    await db.prepare("UPDATE exit_requests SET status = 'completed' WHERE id = ?").run(id);
   }
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'exit.department_cleared',
     resource: 'exit_requests',
@@ -658,15 +712,13 @@ coreRouter.post('/exits/:id/clear', requirePermission('employees.manage'), (req:
 // ---------------------------------------------------------------------------
 // Company Settings & Multi-Branch Holidays
 // ---------------------------------------------------------------------------
-coreRouter.get('/settings', (_req, res) => {
-  const rows = db.prepare('SELECT key, value, category FROM company_settings').all() as Array<{
-    key: string;
-    value: string;
-    category: string;
-  }>;
+coreRouter.get('/settings', async (_req, res) => {
+  const rows = await db
+    .prepare('SELECT key, value, category FROM company_settings')
+    .all<{ key: string; value: string; category: string }>();
   const settings: Record<string, string> = {};
   for (const r of rows) settings[r.key] = r.value;
-  const holidays = db
+  const holidays = await db
     .prepare(
       `SELECT h.*, b.name as branch_name
        FROM holidays h LEFT JOIN branches b ON b.id = h.branch_id
@@ -676,7 +728,7 @@ coreRouter.get('/settings', (_req, res) => {
   res.json({ settings, holidays });
 });
 
-coreRouter.put('/settings', requirePermission('security.manage'), (req: AuthedRequest, res) => {
+coreRouter.put('/settings', requirePermission('security.manage'), async (req: AuthedRequest, res) => {
   const schema = z.record(z.string(), z.string().max(300));
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -690,9 +742,9 @@ coreRouter.put('/settings', requirePermission('security.manage'), (req: AuthedRe
   );
   for (const [k, v] of Object.entries(parsed.data)) {
     if (k === 'admin_claimed') continue;
-    upsert.run(k, v, now);
+    await upsert.run(k, v, now);
   }
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'settings.updated',
     resource: 'company_settings',
@@ -702,7 +754,7 @@ coreRouter.put('/settings', requirePermission('security.manage'), (req: AuthedRe
   res.json({ ok: true });
 });
 
-coreRouter.post('/holidays', requirePermission('branches.manage'), (req: AuthedRequest, res) => {
+coreRouter.post('/holidays', requirePermission('branches.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     branchId: z.number().int().positive().nullable().optional(),
     name: z.string().min(2).max(100),
@@ -713,14 +765,14 @@ coreRouter.post('/holidays', requirePermission('branches.manage'), (req: AuthedR
     res.status(400).json({ error: 'Invalid holiday data.' });
     return;
   }
-  const info = db
+  const info = await db
     .prepare('INSERT INTO holidays (branch_id, name, holiday_date, is_recurring) VALUES (?, ?, ?, 1)')
     .run(parsed.data.branchId ?? null, parsed.data.name, parsed.data.holidayDate);
   res.status(201).json({ id: Number(info.lastInsertRowid) });
 });
 
-export function loadWorkflowRules(): WorkflowRule[] {
-  const rows = db.prepare('SELECT * FROM workflow_rules').all() as Array<{
+export async function loadWorkflowRules(): Promise<WorkflowRule[]> {
+  const rows = await db.prepare('SELECT * FROM workflow_rules').all<{
     id: number;
     name: string;
     trigger_event: WorkflowRule['triggerEvent'];
@@ -731,7 +783,7 @@ export function loadWorkflowRules(): WorkflowRule[] {
     approver_roles_json: string;
     webhook_event: string | null;
     is_active: number;
-  }>;
+  }>();
   return rows.map((r) => ({
     id: r.id,
     name: r.name,

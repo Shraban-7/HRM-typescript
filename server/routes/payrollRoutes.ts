@@ -12,10 +12,10 @@ import { dispatchWebhookEvent } from '../services/webhookService';
 export const payrollRouter = Router();
 payrollRouter.use(requireAuth);
 
-function loadTaxBrackets(): TaxBracket[] {
-  const rows = db
+async function loadTaxBrackets(): Promise<TaxBracket[]> {
+  const rows = (await db
     .prepare('SELECT label, min_income, max_income, rate FROM tax_brackets ORDER BY sort_order ASC, min_income ASC')
-    .all() as Array<{ label: string; min_income: number; max_income: number | null; rate: number }>;
+    .all()) as Array<{ label: string; min_income: number; max_income: number | null; rate: number }>;
   return rows.map((r) => ({
     label: r.label,
     min: r.min_income,
@@ -24,8 +24,12 @@ function loadTaxBrackets(): TaxBracket[] {
   }));
 }
 
-function buildPayrollInputs(periodStart: string, periodEnd: string, branchId: number | null): PayrollEmployeeInput[] {
-  const employees = db
+async function buildPayrollInputs(
+  periodStart: string,
+  periodEnd: string,
+  branchId: number | null
+): Promise<PayrollEmployeeInput[]> {
+  const employees = (await db
     .prepare(
       `SELECT e.*, b.name as branch_name, b.state_tax_rate, d.name as department_name
        FROM employees e
@@ -34,7 +38,7 @@ function buildPayrollInputs(periodStart: string, periodEnd: string, branchId: nu
        WHERE e.status = 'active' ${branchId ? 'AND e.branch_id = ?' : ''}
        ORDER BY e.employee_code ASC`
     )
-    .all(...(branchId ? [branchId] : [])) as Array<{
+    .all(...(branchId ? [branchId] : []))) as Array<{
     id: number;
     employee_code: string;
     full_name: string;
@@ -48,81 +52,79 @@ function buildPayrollInputs(periodStart: string, periodEnd: string, branchId: nu
     termination_date: string | null;
   }>;
 
-  return employees.map((emp) => {
-    const preTaxBen = (
-      db
-        .prepare(
-          `SELECT COALESCE(SUM(b.employee_monthly_cost), 0) as total
-           FROM benefit_enrollments be JOIN benefits b ON b.id = be.benefit_id
-           WHERE be.employee_id = ? AND be.status = 'active' AND b.tax_treatment = 'pre_tax'`
-        )
-        .get(emp.id) as { total: number }
-    ).total;
+  const inputs: PayrollEmployeeInput[] = [];
 
-    const postTaxBen = (
-      db
-        .prepare(
-          `SELECT COALESCE(SUM(b.employee_monthly_cost), 0) as total
-           FROM benefit_enrollments be JOIN benefits b ON b.id = be.benefit_id
-           WHERE be.employee_id = ? AND be.status = 'active' AND b.tax_treatment = 'post_tax'`
-        )
-        .get(emp.id) as { total: number }
-    ).total;
+  for (const emp of employees) {
+    const preTaxBenRow = (await db
+      .prepare(
+        `SELECT COALESCE(SUM(b.employee_monthly_cost), 0) as total
+         FROM benefit_enrollments be JOIN benefits b ON b.id = be.benefit_id
+         WHERE be.employee_id = ? AND be.status = 'active' AND b.tax_treatment = 'pre_tax'`
+      )
+      .get(emp.id)) as { total: number } | undefined;
+    const preTaxBen = Number(preTaxBenRow?.total ?? 0);
+
+    const postTaxBenRow = (await db
+      .prepare(
+        `SELECT COALESCE(SUM(b.employee_monthly_cost), 0) as total
+         FROM benefit_enrollments be JOIN benefits b ON b.id = be.benefit_id
+         WHERE be.employee_id = ? AND be.status = 'active' AND b.tax_treatment = 'post_tax'`
+      )
+      .get(emp.id)) as { total: number } | undefined;
+    const postTaxBen = Number(postTaxBenRow?.total ?? 0);
 
     const monthly401k = Math.round(((emp.annual_salary / 12) * (emp.pre_tax_401k_pct / 100)) * 100) / 100;
 
-    const overtimeHours = (
-      db
-        .prepare(
-          `SELECT COALESCE(SUM(overtime_hours), 0) as ot
-           FROM attendances WHERE employee_id = ? AND work_date BETWEEN ? AND ?`
-        )
-        .get(emp.id, periodStart, periodEnd) as { ot: number }
-    ).ot;
+    const overtimeRow = (await db
+      .prepare(
+        `SELECT COALESCE(SUM(overtime_hours), 0) as ot
+         FROM attendances WHERE employee_id = ? AND work_date BETWEEN ? AND ?`
+      )
+      .get(emp.id, periodStart, periodEnd)) as { ot: number } | undefined;
+    const overtimeHours = Number(overtimeRow?.ot ?? 0);
 
-    const unpaidDays = (
-      db
-        .prepare(
-          `SELECT COALESCE(SUM(days), 0) as d
-           FROM leave_requests
-           WHERE employee_id = ? AND leave_type = 'unpaid' AND status = 'approved'
-           AND start_date <= ? AND end_date >= ?`
-        )
-        .get(emp.id, periodEnd, periodStart) as { d: number }
-    ).d;
+    const unpaidRow = (await db
+      .prepare(
+        `SELECT COALESCE(SUM(days), 0) as d
+         FROM leave_requests
+         WHERE employee_id = ? AND leave_type = 'unpaid' AND status = 'approved'
+         AND start_date <= ? AND end_date >= ?`
+      )
+      .get(emp.id, periodEnd, periodStart)) as { d: number } | undefined;
+    const unpaidDays = Number(unpaidRow?.d ?? 0);
 
-    const approvedExpenses = (
-      db
-        .prepare(
-          `SELECT COALESCE(SUM(amount), 0) as amt
-           FROM expenses
-           WHERE employee_id = ? AND status = 'approved' AND reimbursed_in_payroll_id IS NULL`
-        )
-        .get(emp.id) as { amt: number }
-    ).amt;
+    const approvedExpensesRow = (await db
+      .prepare(
+        `SELECT COALESCE(SUM(amount), 0) as amt
+         FROM expenses
+         WHERE employee_id = ? AND status = 'approved' AND reimbursed_in_payroll_id IS NULL`
+      )
+      .get(emp.id)) as { amt: number } | undefined;
+    const approvedExpenses = Number(approvedExpensesRow?.amt ?? 0);
 
-    const activeLoan = db
-      .prepare("SELECT monthly_installment, remaining_balance FROM loans WHERE employee_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1")
-      .get(emp.id) as { monthly_installment: number; remaining_balance: number } | undefined;
+    const activeLoan = (await db
+      .prepare(
+        "SELECT monthly_installment, remaining_balance FROM loans WHERE employee_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1"
+      )
+      .get(emp.id)) as { monthly_installment: number; remaining_balance: number } | undefined;
 
     const loanInstallment = activeLoan
       ? Math.min(activeLoan.monthly_installment, activeLoan.remaining_balance)
       : 0;
 
-    const priorSlip = db
+    const priorSlip = (await db
       .prepare(
         `SELECT ps.net_pay FROM payslips ps
          JOIN payrolls pr ON pr.id = ps.payroll_id
          WHERE ps.employee_id = ? AND pr.status = 'finalized'
          ORDER BY ps.id DESC LIMIT 1`
       )
-      .get(emp.id) as { net_pay: number } | undefined;
+      .get(emp.id)) as { net_pay: number } | undefined;
 
-    // Approximate prior YTD gross based on months elapsed this year
     const monthIndex = Math.max(0, Number(periodStart.slice(5, 7)) - 1);
     const ytdGrossPrior = Math.round((emp.annual_salary / 12) * monthIndex * 100) / 100;
 
-    return {
+    inputs.push({
       employeeId: emp.id,
       employeeCode: emp.employee_code,
       employeeName: emp.full_name,
@@ -142,14 +144,16 @@ function buildPayrollInputs(periodStart: string, periodEnd: string, branchId: nu
       expenseReimbursement: approvedExpenses,
       loanInstallment,
       priorPeriodNet: priorSlip?.net_pay ?? null,
-    };
-  });
+    });
+  }
+
+  return inputs;
 }
 
 // List payroll runs + tax brackets
-payrollRouter.get('/payrolls', requirePermission('payroll.view'), (req: AuthedRequest, res) => {
+payrollRouter.get('/payrolls', requirePermission('payroll.view'), async (req: AuthedRequest, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
-  const runs = db
+  const runs = await db
     .prepare(
       `SELECT p.*, b.name as branch_name, u.full_name as approver_name
        FROM payrolls p
@@ -160,7 +164,7 @@ payrollRouter.get('/payrolls', requirePermission('payroll.view'), (req: AuthedRe
     )
     .all(...(branchId ? [branchId] : []));
 
-  const taxBrackets = db
+  const taxBrackets = await db
     .prepare('SELECT * FROM tax_brackets ORDER BY sort_order ASC, min_income ASC')
     .all();
 
@@ -168,7 +172,7 @@ payrollRouter.get('/payrolls', requirePermission('payroll.view'), (req: AuthedRe
 });
 
 // Create new Draft payroll run
-payrollRouter.post('/payrolls', requirePermission('payroll.run'), (req: AuthedRequest, res) => {
+payrollRouter.post('/payrolls', requirePermission('payroll.run'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     branchId: z.number().int().positive().nullable().optional(),
     periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -184,14 +188,14 @@ payrollRouter.post('/payrolls', requirePermission('payroll.run'), (req: AuthedRe
   const d = parsed.data;
   const suffix = String(Date.now()).slice(-4);
   const runCode = `PR-${d.periodStart.slice(0, 7)}-${suffix}`;
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO payrolls (run_code, branch_id, period_start, period_end, pay_date, status, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)`
     )
     .run(runCode, d.branchId ?? null, d.periodStart, d.periodEnd, d.payDate, req.user!.id, new Date().toISOString());
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'payroll.created',
     resource: 'payrolls',
@@ -204,9 +208,9 @@ payrollRouter.post('/payrolls', requirePermission('payroll.run'), (req: AuthedRe
 });
 
 // View payroll run details & itemized payslips
-payrollRouter.get('/payrolls/:id', requirePermission('payroll.view'), (req: AuthedRequest, res) => {
+payrollRouter.get('/payrolls/:id', requirePermission('payroll.view'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  const payroll = db
+  const payroll = await db
     .prepare(
       `SELECT p.*, b.name as branch_name, u.full_name as approver_name
        FROM payrolls p
@@ -224,7 +228,7 @@ payrollRouter.get('/payrolls/:id', requirePermission('payroll.view'), (req: Auth
   const isPrivileged =
     req.user!.roles.includes('super_admin') || req.user!.roles.includes('hr_admin');
 
-  const payslips = db
+  const payslips = await db
     .prepare(
       `SELECT ps.*, e.employee_code, e.full_name as employee_name, e.designation,
               b.name as branch_name, d.name as department_name
@@ -241,9 +245,9 @@ payrollRouter.get('/payrolls/:id', requirePermission('payroll.view'), (req: Auth
 });
 
 // Stage 1: Dry-Run Simulation with progressive statutory math + variance alerts
-payrollRouter.post('/payrolls/:id/simulate', requirePermission('payroll.run'), (req: AuthedRequest, res) => {
+payrollRouter.post('/payrolls/:id/simulate', requirePermission('payroll.run'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  const payroll = db.prepare('SELECT * FROM payrolls WHERE id = ?').get(id) as
+  const payroll = (await db.prepare('SELECT * FROM payrolls WHERE id = ?').get(id)) as
     | { id: number; status: string; period_start: string; period_end: string; branch_id: number | null; run_code: string }
     | undefined;
 
@@ -256,19 +260,18 @@ payrollRouter.post('/payrolls/:id/simulate', requirePermission('payroll.run'), (
     return;
   }
 
-  const priorRun = db
+  const priorRun = (await db
     .prepare("SELECT total_net FROM payrolls WHERE status = 'finalized' AND id != ? ORDER BY id DESC LIMIT 1")
-    .get(id) as { total_net: number } | undefined;
+    .get(id)) as { total_net: number } | undefined;
 
-  const inputs = buildPayrollInputs(payroll.period_start, payroll.period_end, payroll.branch_id);
-  const brackets = loadTaxBrackets();
+  const inputs = await buildPayrollInputs(payroll.period_start, payroll.period_end, payroll.branch_id);
+  const brackets = await loadTaxBrackets();
   const sim = simulatePayrollRun(inputs, payroll.period_start, payroll.period_end, brackets, priorRun?.total_net ?? null);
 
-  db.exec('BEGIN');
-  try {
-    db.prepare('DELETE FROM payslips WHERE payroll_id = ?').run(id);
+  await db.transaction(async (tx) => {
+    await tx.prepare('DELETE FROM payslips WHERE payroll_id = ?').run(id);
     const now = new Date().toISOString();
-    const insertSlip = db.prepare(
+    const insertSlip = tx.prepare(
       `INSERT INTO payslips (
         payroll_id, employee_id, base_monthly_salary, proration_factor, overtime_hours, overtime_pay,
         bonus_amount, unpaid_leave_deduction, gross_pay, pre_tax_deductions, taxable_gross,
@@ -279,7 +282,7 @@ payrollRouter.post('/payrolls/:id/simulate', requirePermission('payroll.run'), (
     );
 
     for (const item of sim.items) {
-      insertSlip.run(
+      await insertSlip.run(
         id,
         item.employeeId,
         item.baseMonthlySalary,
@@ -308,29 +311,27 @@ payrollRouter.post('/payrolls/:id/simulate', requirePermission('payroll.run'), (
       );
     }
 
-    db.prepare(
-      `UPDATE payrolls
-       SET status = 'simulated', employee_count = ?, total_gross = ?, total_pre_tax = ?, total_taxes = ?,
-           total_net = ?, total_employer_taxes = ?, variance_pct = ?, anomaly_count = ?
-       WHERE id = ?`
-    ).run(
-      sim.employeeCount,
-      sim.totalGross,
-      sim.totalPreTax,
-      sim.totalTaxes,
-      sim.totalNet,
-      sim.totalEmployerTaxes,
-      sim.runVariancePct,
-      sim.anomalyCount,
-      id
-    );
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+    await tx
+      .prepare(
+        `UPDATE payrolls
+         SET status = 'simulated', employee_count = ?, total_gross = ?, total_pre_tax = ?, total_taxes = ?,
+             total_net = ?, total_employer_taxes = ?, variance_pct = ?, anomaly_count = ?
+         WHERE id = ?`
+      )
+      .run(
+        sim.employeeCount,
+        sim.totalGross,
+        sim.totalPreTax,
+        sim.totalTaxes,
+        sim.totalNet,
+        sim.totalEmployerTaxes,
+        sim.runVariancePct,
+        sim.anomalyCount,
+        id
+      );
+  });
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'payroll.simulated',
     resource: 'payrolls',
@@ -349,9 +350,9 @@ payrollRouter.post('/payrolls/:id/simulate', requirePermission('payroll.run'), (
 });
 
 // Stage 2: Approval Sign-Off
-payrollRouter.post('/payrolls/:id/approve', requirePermission('payroll.run'), (req: AuthedRequest, res) => {
+payrollRouter.post('/payrolls/:id/approve', requirePermission('payroll.run'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  const payroll = db.prepare('SELECT id, status, run_code FROM payrolls WHERE id = ?').get(id) as
+  const payroll = (await db.prepare('SELECT id, status, run_code FROM payrolls WHERE id = ?').get(id)) as
     | { id: number; status: string; run_code: string }
     | undefined;
   if (!payroll) {
@@ -363,12 +364,10 @@ payrollRouter.post('/payrolls/:id/approve', requirePermission('payroll.run'), (r
     return;
   }
   const now = new Date().toISOString();
-  db.prepare("UPDATE payrolls SET status = 'approved', approved_by = ?, approved_at = ? WHERE id = ?").run(
-    req.user!.id,
-    now,
-    id
-  );
-  recordAuditLog({
+  await db
+    .prepare("UPDATE payrolls SET status = 'approved', approved_by = ?, approved_at = ? WHERE id = ?")
+    .run(req.user!.id, now, id);
+  await recordAuditLog({
     user: req.user,
     action: 'payroll.approved',
     resource: 'payrolls',
@@ -383,7 +382,7 @@ payrollRouter.post('/payrolls/:id/approve', requirePermission('payroll.run'), (r
 // Stage 3: Finalize & Lock (Immutable Payslips, Loan Auto-Repayment, Expense Reimbursement Mark, Webhook Dispatch)
 payrollRouter.post('/payrolls/:id/finalize', requirePermission('payroll.finalize'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  const payroll = db.prepare('SELECT * FROM payrolls WHERE id = ?').get(id) as
+  const payroll = (await db.prepare('SELECT * FROM payrolls WHERE id = ?').get(id)) as
     | { id: number; status: string; run_code: string; employee_count: number; total_net: number; total_gross: number }
     | undefined;
   if (!payroll) {
@@ -396,43 +395,38 @@ payrollRouter.post('/payrolls/:id/finalize', requirePermission('payroll.finalize
   }
 
   const now = new Date().toISOString();
-  db.exec('BEGIN');
-  try {
-    db.prepare("UPDATE payrolls SET status = 'finalized', finalized_at = ? WHERE id = ?").run(now, id);
-    db.prepare('UPDATE payslips SET is_locked = 1, issued_at = ? WHERE payroll_id = ?').run(now, id);
+  await db.transaction(async (tx) => {
+    await tx.prepare("UPDATE payrolls SET status = 'finalized', finalized_at = ? WHERE id = ?").run(now, id);
+    await tx.prepare('UPDATE payslips SET is_locked = 1, issued_at = ? WHERE payroll_id = ?').run(now, id);
 
     // Apply loan deductions & mark approved expenses as reimbursed
-    const slips = db
+    const slips = (await tx
       .prepare('SELECT employee_id, loan_deduction, expense_reimbursement FROM payslips WHERE payroll_id = ?')
-      .all(id) as Array<{ employee_id: number; loan_deduction: number; expense_reimbursement: number }>;
+      .all(id)) as Array<{ employee_id: number; loan_deduction: number; expense_reimbursement: number }>;
 
     for (const s of slips) {
       if (s.loan_deduction > 0) {
-        const loan = db
+        const loan = (await tx
           .prepare("SELECT id, remaining_balance FROM loans WHERE employee_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1")
-          .get(s.employee_id) as { id: number; remaining_balance: number } | undefined;
+          .get(s.employee_id)) as { id: number; remaining_balance: number } | undefined;
         if (loan) {
           const nextBal = Math.max(0, Math.round((loan.remaining_balance - s.loan_deduction) * 100) / 100);
-          db.prepare('UPDATE loans SET remaining_balance = ?, status = ? WHERE id = ?').run(
-            nextBal,
-            nextBal <= 0 ? 'paid_off' : 'active',
-            loan.id
-          );
+          await tx
+            .prepare('UPDATE loans SET remaining_balance = ?, status = ? WHERE id = ?')
+            .run(nextBal, nextBal <= 0 ? 'paid_off' : 'active', loan.id);
         }
       }
       if (s.expense_reimbursement > 0) {
-        db.prepare(
-          "UPDATE expenses SET reimbursed_in_payroll_id = ? WHERE employee_id = ? AND status = 'approved' AND reimbursed_in_payroll_id IS NULL"
-        ).run(id, s.employee_id);
+        await tx
+          .prepare(
+            "UPDATE expenses SET reimbursed_in_payroll_id = ? WHERE employee_id = ? AND status = 'approved' AND reimbursed_in_payroll_id IS NULL"
+          )
+          .run(id, s.employee_id);
       }
     }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+  });
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'payroll.finalized',
     resource: 'payrolls',
@@ -454,18 +448,18 @@ payrollRouter.post('/payrolls/:id/finalize', requirePermission('payroll.finalize
 });
 
 // Export Bank ACH Batch CSV or Statutory Tax Filing Summary CSV
-payrollRouter.get('/payrolls/:id/export', requirePermission('payroll.view'), (req: AuthedRequest, res) => {
+payrollRouter.get('/payrolls/:id/export', requirePermission('payroll.view'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
   const type = req.query.type === 'statutory' ? 'statutory' : 'bank';
-  const payroll = db.prepare('SELECT run_code, period_start, period_end FROM payrolls WHERE id = ?').get(id) as
-    | { run_code: string; period_start: string; period_end: string }
-    | undefined;
+  const payroll = (await db
+    .prepare('SELECT run_code, period_start, period_end FROM payrolls WHERE id = ?')
+    .get(id)) as { run_code: string; period_start: string; period_end: string } | undefined;
   if (!payroll) {
     res.status(404).json({ error: 'Payroll not found.' });
     return;
   }
 
-  const rows = db
+  const rows = (await db
     .prepare(
       `SELECT ps.*, e.employee_code, e.full_name, e.bank_name, b.name as branch_name, b.cost_center
        FROM payslips ps
@@ -473,7 +467,7 @@ payrollRouter.get('/payrolls/:id/export', requirePermission('payroll.view'), (re
        JOIN branches b ON b.id = e.branch_id
        WHERE ps.payroll_id = ? ORDER BY e.employee_code ASC`
     )
-    .all(id) as Array<Record<string, unknown>>;
+    .all(id)) as Array<Record<string, unknown>>;
 
   let csv = '';
   if (type === 'bank') {
@@ -494,7 +488,7 @@ payrollRouter.get('/payrolls/:id/export', requirePermission('payroll.view'), (re
 });
 
 // Update progressive tax bracket
-payrollRouter.put('/tax-brackets/:id', requirePermission('tax.manage'), (req: AuthedRequest, res) => {
+payrollRouter.put('/tax-brackets/:id', requirePermission('tax.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
   const schema = z.object({
     label: z.string().min(2).max(60),
@@ -508,14 +502,10 @@ payrollRouter.put('/tax-brackets/:id', requirePermission('tax.manage'), (req: Au
     return;
   }
   const d = parsed.data;
-  db.prepare('UPDATE tax_brackets SET label = ?, min_income = ?, max_income = ?, rate = ? WHERE id = ?').run(
-    d.label,
-    d.minIncome,
-    d.maxIncome,
-    d.rate,
-    id
-  );
-  recordAuditLog({
+  await db
+    .prepare('UPDATE tax_brackets SET label = ?, min_income = ?, max_income = ?, rate = ? WHERE id = ?')
+    .run(d.label, d.minIncome, d.maxIncome, d.rate, id);
+  await recordAuditLog({
     user: req.user,
     action: 'tax.bracket_updated',
     resource: 'tax_brackets',
@@ -527,10 +517,10 @@ payrollRouter.put('/tax-brackets/:id', requirePermission('tax.manage'), (req: Au
 });
 
 // My Payslips (Self-service or Admin view)
-payrollRouter.get('/payslips', requirePermission('payroll.view'), (req: AuthedRequest, res) => {
+payrollRouter.get('/payslips', requirePermission('payroll.view'), async (req: AuthedRequest, res) => {
   const isPrivileged =
     req.user!.roles.includes('super_admin') || req.user!.roles.includes('hr_admin');
-  const slips = db
+  const slips = await db
     .prepare(
       `SELECT ps.*, pr.run_code, pr.period_start, pr.period_end, pr.pay_date, pr.status as payroll_status,
               e.employee_code, e.full_name as employee_name, e.designation, b.name as branch_name, d.name as department_name
@@ -549,11 +539,11 @@ payrollRouter.get('/payslips', requirePermission('payroll.view'), (req: AuthedRe
 // ---------------------------------------------------------------------------
 // Benefits Catalog, Enrollments & COBRA Compliance
 // ---------------------------------------------------------------------------
-payrollRouter.get('/benefits', requirePermission('benefits.view'), (req: AuthedRequest, res) => {
-  const plans = db.prepare('SELECT * FROM benefits ORDER BY category, name').all();
+payrollRouter.get('/benefits', requirePermission('benefits.view'), async (req: AuthedRequest, res) => {
+  const plans = await db.prepare('SELECT * FROM benefits ORDER BY category, name').all();
   const isPrivileged =
     req.user!.roles.includes('super_admin') || req.user!.roles.includes('hr_admin');
-  const enrollments = db
+  const enrollments = await db
     .prepare(
       `SELECT be.*, b.name as benefit_name, b.category, b.provider, b.tax_treatment,
               b.employee_monthly_cost, b.employer_monthly_cost,
@@ -566,12 +556,12 @@ payrollRouter.get('/benefits', requirePermission('benefits.view'), (req: AuthedR
     )
     .all(...(isPrivileged ? [] : [req.user!.employeeId ?? -1]));
   const cobra = isPrivileged
-    ? db.prepare('SELECT * FROM cobra_coverages ORDER BY id DESC').all()
+    ? await db.prepare('SELECT * FROM cobra_coverages ORDER BY id DESC').all()
     : [];
   res.json({ plans, enrollments, cobra });
 });
 
-payrollRouter.post('/benefits/enroll', requirePermission('benefits.view'), (req: AuthedRequest, res) => {
+payrollRouter.post('/benefits/enroll', requirePermission('benefits.view'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     benefitId: z.number().int().positive(),
     employeeId: z.number().int().positive().optional(),
@@ -587,13 +577,13 @@ payrollRouter.post('/benefits/enroll', requirePermission('benefits.view'), (req:
     res.status(400).json({ error: 'No employee profile linked.' });
     return;
   }
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO benefit_enrollments (employee_id, benefit_id, coverage_tier, status, enrolled_at)
        VALUES (?, ?, ?, 'active', ?)`
     )
     .run(targetEmp, parsed.data.benefitId, parsed.data.coverageTier, new Date().toISOString().slice(0, 10));
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'benefits.enrolled',
     resource: 'benefit_enrollments',
@@ -604,7 +594,7 @@ payrollRouter.post('/benefits/enroll', requirePermission('benefits.view'), (req:
   res.status(201).json({ id: Number(info.lastInsertRowid) });
 });
 
-payrollRouter.post('/cobra', requirePermission('benefits.manage'), (req: AuthedRequest, res) => {
+payrollRouter.post('/cobra', requirePermission('benefits.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     employeeName: z.string().min(2).max(120),
     qualifyingEvent: z.string().min(2).max(120),
@@ -619,7 +609,7 @@ payrollRouter.post('/cobra', requirePermission('benefits.manage'), (req: AuthedR
     return;
   }
   const d = parsed.data;
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO cobra_coverages (employee_name, qualifying_event, plan_name, monthly_premium, start_date, end_date, status)
        VALUES (?, ?, ?, ?, ?, ?, 'offered')`

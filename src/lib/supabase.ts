@@ -12,8 +12,9 @@ function getValidSupabaseUrl(raw: string | undefined): string {
   }
 }
 
-const supabaseUrl = getValidSupabaseUrl(import.meta.env.VITE_SUPABASE_URL as string | undefined);
-const supabaseAnonKey = ((import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ?? '').trim();
+// Static NEXT_PUBLIC_* property access ensures Next.js inlines public Supabase config into client bundles.
+const supabaseUrl = getValidSupabaseUrl(process.env.NEXT_PUBLIC_SUPABASE_URL);
+const supabaseAnonKey = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '').trim();
 
 export const isSupabaseClientConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 

@@ -1,10 +1,10 @@
 # Nexus HRM — Enterprise Multi-Branch Human Resource Management
 
-Full-stack TypeScript enterprise HRM workspace built with **React 19**, **Tailwind CSS v4**, **Express 5**, and **SQLite (`node:sqlite`)**.
+Full-stack TypeScript enterprise HRM workspace built with **Next.js (App Router)**, **React 19**, **Tailwind CSS v4**, and **Supabase PostgreSQL** (with automatic local SQLite fallback for offline development).
 
 ## Core Capabilities
 
-- **Enterprise Security & Governance**: `scrypt` password hashing, DB-tracked account lockout, RFC 6238 TOTP MFA with 8 single-use recovery codes, uniform server-side RBAC matrix, and SHA-256 tamper-evident hash-chained audit logging.
+- **Enterprise Security & Governance**: Supabase Auth integration, `scrypt` password hashing, DB-tracked account lockout, RFC 6238 TOTP MFA with 8 single-use recovery codes, uniform server-side RBAC matrix, and SHA-256 tamper-evident hash-chained audit logging.
 - **Multi-Branch Enterprise Topology**: Single-company workspace (`Nexus Technologies Inc.`) with regional office branches (Austin HQ, New York East, London EMEA, Singapore APAC), cost centers, state tax rates, and regional holiday calendars.
 - **Statutory Payroll & Benefits Engine**: Multi-stage payroll governance (`Draft → Simulated → Approved → Finalized/Locked`), progressive federal tax brackets, state tax, FICA Social Security cap & Additional Medicare, pre-tax 401(k)/Section 125 deductions, mid-period proration, overtime, variance anomaly detection, printable payslips, Bank ACH & Statutory CSV exports, and COBRA administration.
 - **Core HR, Time & Talent**: Employee directory, interactive Org Chart, onboarding/exit clearances, self-service clock-in/out & shift builder, workflow-routed leave requests, Recruitment ATS with Public Career Portal & one-click Hire-to-Employee, and Performance Calibration & OKRs.
@@ -13,20 +13,23 @@ Full-stack TypeScript enterprise HRM workspace built with **React 19**, **Tailwi
 
 ## Scripts
 
-- `npm run dev` — Start Express + Vite full-stack server on port 3000
-- `npm run build` — Compile production frontend bundle
+- `npm run dev` — Start Next.js development server on port 3000
+- `npm run build` — Compile production Next.js build
+- `npm run start` — Start Next.js production server on port 3000
 - `npm run lint` — TypeScript static check (`tsc --noEmit`)
-- `npm test` — Run pure domain unit test suite (`node:test`)
+- `npm test` — Run pure domain & SQL translation unit test suite (`node:test`)
 
-## Deploying to Vercel with Supabase Login
+## Connecting Supabase Database & Deploying to Vercel
 
-Vercel routes all `/api/*` traffic to the serverless Express handler in `api/index.ts` via `vercel.json`.
+Nexus HRM runs natively on **Vercel** using Next.js App Router and `/src/app/api/[[...route]]/route.ts`.
 
-Configure these Environment Variables in your Vercel project settings to enable Supabase Authentication:
+Configure these Environment Variables in your Vercel project (or `.env.local`):
 
-- `VITE_SUPABASE_URL` — Your Supabase Project URL (`https://<project-ref>.supabase.co`)
-- `VITE_SUPABASE_ANON_KEY` — Your Supabase public `anon` key
-- `SUPABASE_URL` — Same Supabase Project URL (used by the server to verify Supabase JWTs)
-- `SUPABASE_ANON_KEY` — Same Supabase `anon` key (used by the server to verify Supabase JWTs)
+- `DATABASE_URL` *(or `SUPABASE_DB_URL`)* — Your Supabase PostgreSQL connection string (from **Supabase Dashboard → Connect → Transaction Pooler / Session Pooler URI**)
+- `NEXT_PUBLIC_SUPABASE_URL` — Your Supabase Project URL (`https://<project-ref>.supabase.co`)
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Your Supabase public `anon` key
+- `SUPABASE_URL` — Same Supabase Project URL (used by Next.js API routes to verify Supabase JWTs)
+- `SUPABASE_ANON_KEY` — Same Supabase `anon` key
 - `HRM_ADMIN_EMAIL` *(optional)* — Email address automatically granted `super_admin` when signing in via Supabase
-- `HRM_SESSION_SECRET` *(optional)* — Random 32+ byte secret for signing stateless session tokens across serverless instances
+
+All 35 HRM tables and initial enterprise seed data are initialized automatically on the first API request when connected to Supabase PostgreSQL. You can also inspect or run `/supabase/schema.sql` directly in the Supabase SQL Editor.

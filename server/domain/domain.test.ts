@@ -230,3 +230,52 @@ test('workflow rule engine, leave business days, and attendance shift evaluator 
   assert.equal(shift.overtimeHours, 2);
   assert.equal(shift.status, 'present');
 });
+
+test('Supabase PostgreSQL SQL translator converts placeholders, DDL, GROUP_CONCAT, and RETURNING id accurately', async () => {
+  const {
+    convertPlaceholdersToPg,
+    convertSqliteDdlToPostgres,
+    translateQueryForPg,
+  } = await import('../sqlTranslate');
+
+  // Positional ? conversion ignores ? inside string literals
+  assert.equal(
+    convertPlaceholdersToPg("SELECT * FROM employees WHERE status = 'active?' AND branch_id = ? AND id > ?"),
+    "SELECT * FROM employees WHERE status = 'active?' AND branch_id = $1 AND id > $2"
+  );
+
+  // DDL conversion
+  const pgDdl = convertSqliteDdlToPostgres(
+    'CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, salary REAL NOT NULL);'
+  );
+  assert.equal(pgDdl, 'CREATE TABLE t (id SERIAL PRIMARY KEY, salary DOUBLE PRECISION NOT NULL);');
+
+  // GROUP_CONCAT -> STRING_AGG
+  assert.equal(
+    translateQueryForPg('SELECT u.id, GROUP_CONCAT(r.name) as roles FROM users u GROUP BY u.id'),
+    "SELECT u.id, STRING_AGG(r.name, ',') as roles FROM users u GROUP BY u.id"
+  );
+
+  // INSERT OR IGNORE -> ON CONFLICT DO NOTHING + RETURNING id on surrogate-key tables
+  assert.equal(
+    translateQueryForPg('INSERT OR IGNORE INTO employees (full_name, email) VALUES (?, ?)', {
+      appendReturningId: true,
+    }),
+    'INSERT INTO employees (full_name, email) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING id'
+  );
+
+  // Tables without SERIAL id must NOT get RETURNING id appended
+  assert.equal(
+    translateQueryForPg('INSERT INTO sessions (token_hash, user_id) VALUES (?, ?)', {
+      appendReturningId: true,
+    }),
+    'INSERT INTO sessions (token_hash, user_id) VALUES ($1, $2)'
+  );
+  assert.equal(
+    translateQueryForPg('INSERT INTO company_settings (key, value) VALUES (?, ?)', {
+      appendReturningId: true,
+    }),
+    'INSERT INTO company_settings (key, value) VALUES ($1, $2)'
+  );
+});
+

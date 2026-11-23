@@ -27,20 +27,20 @@ export const publicApiV1Router = Router();
 platformRouter.use(requireAuth);
 
 // RBAC Roles & Permissions Matrix
-platformRouter.get('/rbac', requirePermission('security.manage'), (_req, res) => {
-  const roles = db.prepare('SELECT * FROM roles ORDER BY id ASC').all() as Array<{
+platformRouter.get('/rbac', requirePermission('security.manage'), async (_req, res) => {
+  const roles = (await db.prepare('SELECT * FROM roles ORDER BY id ASC').all()) as Array<{
     id: number;
     slug: string;
     name: string;
     description: string;
     require_mfa: number;
   }>;
-  const permissions = db.prepare('SELECT * FROM permissions ORDER BY module, slug').all();
-  const mappings = db.prepare('SELECT role_id, permission_id FROM role_permissions').all() as Array<{
+  const permissions = await db.prepare('SELECT * FROM permissions ORDER BY module, slug').all();
+  const mappings = (await db.prepare('SELECT role_id, permission_id FROM role_permissions').all()) as Array<{
     role_id: number;
     permission_id: number;
   }>;
-  const users = db
+  const users = await db
     .prepare(
       `SELECT u.id, u.email, u.full_name, u.status, u.mfa_enabled, u.failed_login_attempts, u.last_login_at,
               GROUP_CONCAT(r.name) as role_names
@@ -61,7 +61,7 @@ platformRouter.get('/rbac', requirePermission('security.manage'), (_req, res) =>
   });
 });
 
-platformRouter.post('/rbac/toggle-permission', requirePermission('security.manage'), (req: AuthedRequest, res) => {
+platformRouter.post('/rbac/toggle-permission', requirePermission('security.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     roleId: z.number().int().positive(),
     permissionId: z.number().int().positive(),
@@ -71,31 +71,31 @@ platformRouter.post('/rbac/toggle-permission', requirePermission('security.manag
     res.status(400).json({ error: 'Invalid role/permission selection.' });
     return;
   }
-  const role = db.prepare('SELECT slug FROM roles WHERE id = ?').get(parsed.data.roleId) as { slug: string } | undefined;
+  const role = (await db.prepare('SELECT slug FROM roles WHERE id = ?').get(parsed.data.roleId)) as
+    | { slug: string }
+    | undefined;
   if (role?.slug === 'super_admin') {
     res.status(400).json({ error: 'Super Admin retains all permissions by enterprise policy.' });
     return;
   }
 
-  const existing = db
+  const existing = await db
     .prepare('SELECT 1 FROM role_permissions WHERE role_id = ? AND permission_id = ?')
     .get(parsed.data.roleId, parsed.data.permissionId);
 
   let enabled = false;
   if (existing) {
-    db.prepare('DELETE FROM role_permissions WHERE role_id = ? AND permission_id = ?').run(
-      parsed.data.roleId,
-      parsed.data.permissionId
-    );
+    await db
+      .prepare('DELETE FROM role_permissions WHERE role_id = ? AND permission_id = ?')
+      .run(parsed.data.roleId, parsed.data.permissionId);
   } else {
-    db.prepare('INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)').run(
-      parsed.data.roleId,
-      parsed.data.permissionId
-    );
+    await db
+      .prepare('INSERT INTO role_permissions (role_id, permission_id) VALUES (?, ?)')
+      .run(parsed.data.roleId, parsed.data.permissionId);
     enabled = true;
   }
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'rbac.permission_changed',
     resource: 'role_permissions',
@@ -106,14 +106,14 @@ platformRouter.post('/rbac/toggle-permission', requirePermission('security.manag
   res.json({ ok: true, enabled });
 });
 
-platformRouter.post('/rbac/toggle-mfa-policy', requirePermission('security.manage'), (req: AuthedRequest, res) => {
+platformRouter.post('/rbac/toggle-mfa-policy', requirePermission('security.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({ roleId: z.number().int().positive() });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Invalid role ID.' });
     return;
   }
-  const role = db.prepare('SELECT require_mfa, slug FROM roles WHERE id = ?').get(parsed.data.roleId) as
+  const role = (await db.prepare('SELECT require_mfa, slug FROM roles WHERE id = ?').get(parsed.data.roleId)) as
     | { require_mfa: number; slug: string }
     | undefined;
   if (!role) {
@@ -121,8 +121,8 @@ platformRouter.post('/rbac/toggle-mfa-policy', requirePermission('security.manag
     return;
   }
   const next = role.require_mfa ? 0 : 1;
-  db.prepare('UPDATE roles SET require_mfa = ? WHERE id = ?').run(next, parsed.data.roleId);
-  recordAuditLog({
+  await db.prepare('UPDATE roles SET require_mfa = ? WHERE id = ?').run(next, parsed.data.roleId);
+  await recordAuditLog({
     user: req.user,
     action: 'security.role_mfa_policy_updated',
     resource: 'roles',
@@ -134,9 +134,9 @@ platformRouter.post('/rbac/toggle-mfa-policy', requirePermission('security.manag
 });
 
 // Tamper-Evident Audit Log Viewer & Cryptographic Hash-Chain Verification
-platformRouter.get('/audit', requirePermission('security.manage'), (req, res) => {
+platformRouter.get('/audit', requirePermission('security.manage'), async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : '';
-  const allRows = db.prepare('SELECT * FROM audit_logs ORDER BY id ASC').all() as Array<{
+  const allRows = (await db.prepare('SELECT * FROM audit_logs ORDER BY id ASC').all()) as Array<{
     id: number;
     user_id: number | null;
     actor_email: string | null;
@@ -179,8 +179,8 @@ platformRouter.get('/audit', requirePermission('security.manage'), (req, res) =>
 });
 
 // Scoped API Keys Management
-platformRouter.get('/api-keys', requirePermission('developer.manage'), (_req, res) => {
-  const keys = db
+platformRouter.get('/api-keys', requirePermission('developer.manage'), async (_req, res) => {
+  const keys = await db
     .prepare(
       `SELECT id, name, key_prefix, scopes_json, last_used_at, is_active, created_at
        FROM api_keys ORDER BY id DESC`
@@ -189,7 +189,7 @@ platformRouter.get('/api-keys', requirePermission('developer.manage'), (_req, re
   res.json({ keys });
 });
 
-platformRouter.post('/api-keys', requirePermission('developer.manage'), (req: AuthedRequest, res) => {
+platformRouter.post('/api-keys', requirePermission('developer.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     name: z.string().min(2).max(100),
     scopes: z
@@ -205,14 +205,14 @@ platformRouter.post('/api-keys', requirePermission('developer.manage'), (req: Au
   const rawKey = `nxhrm_live_${crypto.randomBytes(20).toString('hex')}`;
   const prefix = rawKey.slice(0, 18);
   const keyHash = sha256Hex(rawKey);
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO api_keys (name, key_prefix, key_hash, scopes_json, created_by, is_active, created_at)
        VALUES (?, ?, ?, ?, ?, 1, ?)`
     )
     .run(parsed.data.name, prefix, keyHash, JSON.stringify(parsed.data.scopes), req.user!.id, new Date().toISOString());
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'developer.api_key_created',
     resource: 'api_keys',
@@ -231,10 +231,10 @@ platformRouter.post('/api-keys', requirePermission('developer.manage'), (req: Au
   });
 });
 
-platformRouter.post('/api-keys/:id/revoke', requirePermission('developer.manage'), (req: AuthedRequest, res) => {
+platformRouter.post('/api-keys/:id/revoke', requirePermission('developer.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  db.prepare('UPDATE api_keys SET is_active = 0 WHERE id = ?').run(id);
-  recordAuditLog({
+  await db.prepare('UPDATE api_keys SET is_active = 0 WHERE id = ?').run(id);
+  await recordAuditLog({
     user: req.user,
     action: 'developer.api_key_revoked',
     resource: 'api_keys',
@@ -245,11 +245,11 @@ platformRouter.post('/api-keys/:id/revoke', requirePermission('developer.manage'
 });
 
 // Outbound Webhooks & Signed Delivery Inspector
-platformRouter.get('/webhooks', requirePermission('developer.manage'), (_req, res) => {
-  const webhooks = db
+platformRouter.get('/webhooks', requirePermission('developer.manage'), async (_req, res) => {
+  const webhooks = await db
     .prepare('SELECT id, name, target_url, events_json, is_active, created_at FROM webhooks ORDER BY id DESC')
     .all();
-  const deliveries = db
+  const deliveries = await db
     .prepare(
       `SELECT wd.*, w.name as webhook_name, w.target_url
        FROM webhook_deliveries wd JOIN webhooks w ON w.id = wd.webhook_id
@@ -259,7 +259,7 @@ platformRouter.get('/webhooks', requirePermission('developer.manage'), (_req, re
   res.json({ webhooks, deliveries });
 });
 
-platformRouter.post('/webhooks', requirePermission('developer.manage'), (req: AuthedRequest, res) => {
+platformRouter.post('/webhooks', requirePermission('developer.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     name: z.string().min(2).max(100),
     targetUrl: z.string().url(),
@@ -278,14 +278,14 @@ platformRouter.post('/webhooks', requirePermission('developer.manage'), (req: Au
   }
 
   const signingSecret = `whsec_${crypto.randomBytes(18).toString('hex')}`;
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO webhooks (name, target_url, events_json, signing_secret, is_active, created_at)
        VALUES (?, ?, ?, ?, 1, ?)`
     )
     .run(parsed.data.name, parsed.data.targetUrl, JSON.stringify(parsed.data.events), signingSecret, new Date().toISOString());
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'developer.webhook_created',
     resource: 'webhooks',
@@ -317,10 +317,10 @@ platformRouter.post('/webhooks/:id/test', requirePermission('developer.manage'),
   res.json({ delivery: results[0] });
 });
 
-platformRouter.delete('/webhooks/:id', requirePermission('developer.manage'), (req: AuthedRequest, res) => {
+platformRouter.delete('/webhooks/:id', requirePermission('developer.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  db.prepare('DELETE FROM webhooks WHERE id = ?').run(id);
-  recordAuditLog({
+  await db.prepare('DELETE FROM webhooks WHERE id = ?').run(id);
+  await recordAuditLog({
     user: req.user,
     action: 'developer.webhook_deleted',
     resource: 'webhooks',
@@ -368,9 +368,9 @@ publicApiV1Router.get('/openapi.json', (_req, res) => {
   });
 });
 
-publicApiV1Router.get('/employees', requireApiScope('employees:read'), (req, res) => {
+publicApiV1Router.get('/employees', requireApiScope('employees:read'), async (req, res) => {
   const branchCode = typeof req.query.branch === 'string' ? req.query.branch.toUpperCase() : null;
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT e.id, e.employee_code, e.full_name, e.email, e.designation, e.employment_type,
               e.hire_date, e.status, b.code as branch_code, b.name as branch_name, d.name as department_name
@@ -384,15 +384,15 @@ publicApiV1Router.get('/employees', requireApiScope('employees:read'), (req, res
   res.json({ data: rows, meta: { count: rows.length, apiVersion: 'v1' } });
 });
 
-publicApiV1Router.get('/branches', requireApiScope('branches:read'), (_req, res) => {
-  const rows = db
+publicApiV1Router.get('/branches', requireApiScope('branches:read'), async (_req, res) => {
+  const rows = await db
     .prepare('SELECT id, code, name, city, country, timezone, cost_center, state_tax_rate, is_headquarters FROM branches')
     .all();
   res.json({ data: rows, meta: { count: rows.length, apiVersion: 'v1' } });
 });
 
-publicApiV1Router.get('/attendance/today', requireApiScope('attendance:read'), (_req, res) => {
-  const rows = db
+publicApiV1Router.get('/attendance/today', requireApiScope('attendance:read'), async (_req, res) => {
+  const rows = await db
     .prepare(
       `SELECT a.work_date, e.employee_code, e.full_name, b.code as branch_code,
               a.clock_in, a.clock_out, a.worked_hours, a.overtime_hours, a.status, a.source
@@ -406,8 +406,8 @@ publicApiV1Router.get('/attendance/today', requireApiScope('attendance:read'), (
   res.json({ data: rows, meta: { date: '2026-11-23', count: rows.length } });
 });
 
-publicApiV1Router.get('/payroll/summary', requireApiScope('payroll:read'), (_req, res) => {
-  const rows = db
+publicApiV1Router.get('/payroll/summary', requireApiScope('payroll:read'), async (_req, res) => {
+  const rows = await db
     .prepare(
       `SELECT run_code, period_start, period_end, pay_date, status, employee_count,
               total_gross, total_pre_tax, total_taxes, total_net, total_employer_taxes
@@ -417,7 +417,7 @@ publicApiV1Router.get('/payroll/summary', requireApiScope('payroll:read'), (_req
   res.json({ data: rows, meta: { count: rows.length } });
 });
 
-publicApiV1Router.post('/integrations/biometric-sync', requireApiScope('attendance:write'), (req: AuthedRequest, res) => {
+publicApiV1Router.post('/integrations/biometric-sync', requireApiScope('attendance:write'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     deviceId: z.string().min(2).max(60),
     punches: z
@@ -440,37 +440,39 @@ publicApiV1Router.post('/integrations/biometric-sync', requireApiScope('attendan
 
   let synced = 0;
   for (const punch of parsed.data.punches) {
-    const emp = db
+    const emp = (await db
       .prepare('SELECT id, branch_id FROM employees WHERE employee_code = ?')
-      .get(punch.employeeCode) as { id: number; branch_id: number } | undefined;
+      .get(punch.employeeCode)) as { id: number; branch_id: number } | undefined;
     if (!emp) continue;
     const evalRes = evaluateAttendanceShift(punch.clockIn, punch.clockOut ?? null);
-    db.prepare(
-      `INSERT INTO attendances (employee_id, branch_id, work_date, clock_in, clock_out, worked_hours, overtime_hours, status, source, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'biometric', ?)
-       ON CONFLICT(employee_id, work_date) DO UPDATE SET
-         clock_in = excluded.clock_in,
-         clock_out = excluded.clock_out,
-         worked_hours = excluded.worked_hours,
-         overtime_hours = excluded.overtime_hours,
-         status = excluded.status,
-         source = 'biometric',
-         notes = excluded.notes`
-    ).run(
-      emp.id,
-      emp.branch_id,
-      punch.workDate,
-      punch.clockIn,
-      punch.clockOut ?? null,
-      evalRes.workedHours,
-      evalRes.overtimeHours,
-      evalRes.status,
-      `Synced from device ${parsed.data.deviceId}`
-    );
+    await db
+      .prepare(
+        `INSERT INTO attendances (employee_id, branch_id, work_date, clock_in, clock_out, worked_hours, overtime_hours, status, source, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'biometric', ?)
+         ON CONFLICT(employee_id, work_date) DO UPDATE SET
+           clock_in = excluded.clock_in,
+           clock_out = excluded.clock_out,
+           worked_hours = excluded.worked_hours,
+           overtime_hours = excluded.overtime_hours,
+           status = excluded.status,
+           source = 'biometric',
+           notes = excluded.notes`
+      )
+      .run(
+        emp.id,
+        emp.branch_id,
+        punch.workDate,
+        punch.clockIn,
+        punch.clockOut ?? null,
+        evalRes.workedHours,
+        evalRes.overtimeHours,
+        evalRes.status,
+        `Synced from device ${parsed.data.deviceId}`
+      );
     synced += 1;
   }
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'integration.biometric_synced',
     resource: 'attendances',

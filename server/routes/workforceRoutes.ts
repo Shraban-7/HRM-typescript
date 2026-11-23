@@ -15,8 +15,8 @@ export const workforceRouter = Router();
 // ---------------------------------------------------------------------------
 // Public Career Portal Routes (Unauthenticated for External Candidates)
 // ---------------------------------------------------------------------------
-workforceRouter.get('/public/careers', (_req, res) => {
-  const jobs = db
+workforceRouter.get('/public/careers', async (_req, res) => {
+  const jobs = await db
     .prepare(
       `SELECT j.*, b.name as branch_name, b.city as branch_city, b.country as branch_country, d.name as department_name
        FROM job_posts j
@@ -29,9 +29,9 @@ workforceRouter.get('/public/careers', (_req, res) => {
   res.json({ jobs });
 });
 
-workforceRouter.post('/public/careers/:jobId/apply', (req, res) => {
+workforceRouter.post('/public/careers/:jobId/apply', async (req, res) => {
   const jobId = Number(req.params.jobId);
-  const job = db.prepare("SELECT id, title FROM job_posts WHERE id = ? AND status = 'open'").get(jobId) as
+  const job = (await db.prepare("SELECT id, title FROM job_posts WHERE id = ? AND status = 'open'").get(jobId)) as
     | { id: number; title: string }
     | undefined;
   if (!job) {
@@ -49,14 +49,14 @@ workforceRouter.post('/public/careers/:jobId/apply', (req, res) => {
     res.status(400).json({ error: 'Please provide your full name and valid email address.' });
     return;
   }
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO applicants (job_post_id, full_name, email, phone, source, stage, rating, notes, created_at)
        VALUES (?, ?, ?, ?, 'Career Portal', 'applied', 4, ?, ?)`
     )
     .run(jobId, parsed.data.fullName, parsed.data.email, parsed.data.phone, parsed.data.notes, new Date().toISOString());
 
-  recordAuditLog({
+  await recordAuditLog({
     action: 'recruitment.public_application',
     resource: 'applicants',
     resourceId: Number(info.lastInsertRowid),
@@ -73,14 +73,14 @@ workforceRouter.use(requireAuth);
 // ---------------------------------------------------------------------------
 // Attendance, Clock In/Out & Shifts
 // ---------------------------------------------------------------------------
-workforceRouter.get('/attendance', (req: AuthedRequest, res) => {
+workforceRouter.get('/attendance', async (req: AuthedRequest, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
   const canViewAll =
     req.user!.roles.includes('super_admin') ||
     req.user!.roles.includes('hr_admin') ||
     req.user!.roles.includes('manager');
 
-  const records = db
+  const records = await db
     .prepare(
       `SELECT a.*, e.employee_code, e.full_name as employee_name, b.name as branch_name, d.name as department_name
        FROM attendances a
@@ -99,7 +99,7 @@ workforceRouter.get('/attendance', (req: AuthedRequest, res) => {
       ]
     );
 
-  const shifts = db
+  const shifts = await db
     .prepare(
       `SELECT s.*, b.name as branch_name
        FROM shifts s LEFT JOIN branches b ON b.id = s.branch_id
@@ -108,7 +108,7 @@ workforceRouter.get('/attendance', (req: AuthedRequest, res) => {
     .all();
 
   const myToday = req.user!.employeeId
-    ? db
+    ? await db
         .prepare("SELECT * FROM attendances WHERE employee_id = ? AND work_date = '2026-11-23'")
         .get(req.user!.employeeId)
     : null;
@@ -116,7 +116,7 @@ workforceRouter.get('/attendance', (req: AuthedRequest, res) => {
   res.json({ records, shifts, myToday: myToday ?? null });
 });
 
-workforceRouter.post('/attendance/clock-in', requirePermission('attendance.self'), (req: AuthedRequest, res) => {
+workforceRouter.post('/attendance/clock-in', requirePermission('attendance.self'), async (req: AuthedRequest, res) => {
   const empId = req.user!.employeeId;
   const branchId = req.user!.branchId ?? 1;
   if (!empId) {
@@ -125,21 +125,23 @@ workforceRouter.post('/attendance/clock-in', requirePermission('attendance.self'
   }
   const workDate = '2026-11-23';
   const nowIso = new Date().toISOString();
-  const existing = db
+  const existing = (await db
     .prepare('SELECT id FROM attendances WHERE employee_id = ? AND work_date = ?')
-    .get(empId, workDate) as { id: number } | undefined;
+    .get(empId, workDate)) as { id: number } | undefined;
   if (existing) {
     res.status(409).json({ error: 'Already clocked in for today.' });
     return;
   }
 
   const evalRes = evaluateAttendanceShift(nowIso, null);
-  db.prepare(
-    `INSERT INTO attendances (employee_id, branch_id, work_date, clock_in, worked_hours, overtime_hours, status, source)
-     VALUES (?, ?, ?, ?, 0, 0, ?, 'web')`
-  ).run(empId, branchId, workDate, nowIso, evalRes.status);
+  await db
+    .prepare(
+      `INSERT INTO attendances (employee_id, branch_id, work_date, clock_in, worked_hours, overtime_hours, status, source)
+       VALUES (?, ?, ?, ?, 0, 0, ?, 'web')`
+    )
+    .run(empId, branchId, workDate, nowIso, evalRes.status);
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'attendance.clock_in',
     resource: 'attendances',
@@ -150,30 +152,26 @@ workforceRouter.post('/attendance/clock-in', requirePermission('attendance.self'
   res.status(201).json({ ok: true, clockIn: nowIso, status: evalRes.status });
 });
 
-workforceRouter.post('/attendance/clock-out', requirePermission('attendance.self'), (req: AuthedRequest, res) => {
+workforceRouter.post('/attendance/clock-out', requirePermission('attendance.self'), async (req: AuthedRequest, res) => {
   const empId = req.user!.employeeId;
   if (!empId) {
     res.status(400).json({ error: 'No employee profile linked.' });
     return;
   }
   const workDate = '2026-11-23';
-  const row = db
+  const row = (await db
     .prepare('SELECT id, clock_in FROM attendances WHERE employee_id = ? AND work_date = ?')
-    .get(empId, workDate) as { id: number; clock_in: string } | undefined;
+    .get(empId, workDate)) as { id: number; clock_in: string } | undefined;
   if (!row) {
     res.status(400).json({ error: 'Please clock in before clocking out.' });
     return;
   }
   const nowIso = new Date().toISOString();
   const evalRes = evaluateAttendanceShift(row.clock_in, nowIso);
-  db.prepare('UPDATE attendances SET clock_out = ?, worked_hours = ?, overtime_hours = ?, status = ? WHERE id = ?').run(
-    nowIso,
-    evalRes.workedHours,
-    evalRes.overtimeHours,
-    evalRes.status,
-    row.id
-  );
-  recordAuditLog({
+  await db
+    .prepare('UPDATE attendances SET clock_out = ?, worked_hours = ?, overtime_hours = ?, status = ? WHERE id = ?')
+    .run(nowIso, evalRes.workedHours, evalRes.overtimeHours, evalRes.status, row.id);
+  await recordAuditLog({
     user: req.user,
     action: 'attendance.clock_out',
     resource: 'attendances',
@@ -184,7 +182,7 @@ workforceRouter.post('/attendance/clock-out', requirePermission('attendance.self
   res.json({ ok: true, ...evalRes, clockOut: nowIso });
 });
 
-workforceRouter.post('/shifts', requirePermission('attendance.manage'), (req: AuthedRequest, res) => {
+workforceRouter.post('/shifts', requirePermission('attendance.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     branchId: z.number().int().positive().nullable().optional(),
     name: z.string().min(2).max(80),
@@ -199,7 +197,7 @@ workforceRouter.post('/shifts', requirePermission('attendance.manage'), (req: Au
     return;
   }
   const d = parsed.data;
-  const info = db
+  const info = await db
     .prepare(
       'INSERT INTO shifts (branch_id, name, start_time, end_time, standard_hours, overtime_multiplier, grace_minutes) VALUES (?, ?, ?, ?, ?, ?, 15)'
     )
@@ -210,14 +208,14 @@ workforceRouter.post('/shifts', requirePermission('attendance.manage'), (req: Au
 // ---------------------------------------------------------------------------
 // Leave Requests & Workflow-Driven Multi-Step Approval
 // ---------------------------------------------------------------------------
-workforceRouter.get('/leaves', (req: AuthedRequest, res) => {
+workforceRouter.get('/leaves', async (req: AuthedRequest, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
   const canViewAll =
     req.user!.roles.includes('super_admin') ||
     req.user!.roles.includes('hr_admin') ||
     req.user!.roles.includes('manager');
 
-  const leaves = db
+  const leaves = await db
     .prepare(
       `SELECT l.*, e.employee_code, e.full_name as employee_name, b.name as branch_name, d.name as department_name
        FROM leave_requests l
@@ -238,13 +236,13 @@ workforceRouter.get('/leaves', (req: AuthedRequest, res) => {
 
   // Compute logged-in user's leave balances
   const empId = req.user!.employeeId ?? 1;
-  const used = db
+  const used = (await db
     .prepare(
       "SELECT leave_type, COALESCE(SUM(days), 0) as total FROM leave_requests WHERE employee_id = ? AND status = 'approved' GROUP BY leave_type"
     )
-    .all(empId) as Array<{ leave_type: string; total: number }>;
+    .all(empId)) as Array<{ leave_type: string; total: number }>;
   const usedMap: Record<string, number> = {};
-  for (const u of used) usedMap[u.leave_type] = u.total;
+  for (const u of used) usedMap[u.leave_type] = Number(u.total);
 
   res.json({
     leaves,
@@ -278,9 +276,9 @@ workforceRouter.post('/leaves', requirePermission('attendance.self'), async (req
   }
 
   const holidays = (
-    db
+    (await db
       .prepare('SELECT holiday_date FROM holidays WHERE branch_id IS NULL OR branch_id = ?')
-      .all(branchId) as Array<{ holiday_date: string }>
+      .all(branchId)) as Array<{ holiday_date: string }>
   ).map((h) => h.holiday_date);
 
   const days = calculateLeaveBusinessDays(parsed.data.startDate, parsed.data.endDate, holidays);
@@ -289,14 +287,14 @@ workforceRouter.post('/leaves', requirePermission('attendance.self'), async (req
     return;
   }
 
-  const rules = loadWorkflowRules();
+  const rules = await loadWorkflowRules();
   const resolution = evaluateWorkflowRules(rules, {
     triggerEvent: 'leave.submitted',
     branchId,
     days,
   });
 
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO leave_requests (employee_id, branch_id, leave_type, start_date, end_date, days, reason, status, approval_chain_json, current_step, approvals_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, '[]', ?)`
@@ -314,7 +312,7 @@ workforceRouter.post('/leaves', requirePermission('attendance.self'), async (req
     );
 
   const leaveId = Number(info.lastInsertRowid);
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: 'leave.submitted',
     resource: 'leave_requests',
@@ -339,7 +337,7 @@ workforceRouter.post('/leaves/:id/decision', requirePermission('leave.approve'),
     return;
   }
 
-  const row = db.prepare('SELECT * FROM leave_requests WHERE id = ?').get(id) as
+  const row = (await db.prepare('SELECT * FROM leave_requests WHERE id = ?').get(id)) as
     | {
         id: number;
         employee_id: number;
@@ -359,12 +357,10 @@ workforceRouter.post('/leaves/:id/decision', requirePermission('leave.approve'),
   const now = new Date().toISOString();
 
   if (parsed.data.decision === 'reject') {
-    db.prepare("UPDATE leave_requests SET status = 'rejected', reviewed_by = ?, reviewed_at = ? WHERE id = ?").run(
-      req.user!.id,
-      now,
-      id
-    );
-    recordAuditLog({
+    await db
+      .prepare("UPDATE leave_requests SET status = 'rejected', reviewed_by = ?, reviewed_at = ? WHERE id = ?")
+      .run(req.user!.id, now, id);
+    await recordAuditLog({
       user: req.user,
       action: 'leave.rejected',
       resource: 'leave_requests',
@@ -385,11 +381,13 @@ workforceRouter.post('/leaves/:id/decision', requirePermission('leave.approve'),
   const nextStep = req.user!.roles.includes('super_admin') ? chain.length : row.current_step + 1;
   const finalStatus = nextStep >= chain.length ? 'approved' : 'pending';
 
-  db.prepare(
-    'UPDATE leave_requests SET status = ?, current_step = ?, approvals_json = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?'
-  ).run(finalStatus, nextStep, JSON.stringify(approvals), req.user!.id, now, id);
+  await db
+    .prepare(
+      'UPDATE leave_requests SET status = ?, current_step = ?, approvals_json = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?'
+    )
+    .run(finalStatus, nextStep, JSON.stringify(approvals), req.user!.id, now, id);
 
-  recordAuditLog({
+  await recordAuditLog({
     user: req.user,
     action: finalStatus === 'approved' ? 'leave.approved' : 'leave.step_approved',
     resource: 'leave_requests',
@@ -408,9 +406,9 @@ workforceRouter.post('/leaves/:id/decision', requirePermission('leave.approve'),
 // ---------------------------------------------------------------------------
 // Recruitment ATS (Jobs, Applicants Pipeline, Interviews, Hire-to-Employee)
 // ---------------------------------------------------------------------------
-workforceRouter.get('/recruitment', requirePermission('recruitment.view'), (req, res) => {
+workforceRouter.get('/recruitment', requirePermission('recruitment.view'), async (req, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
-  const jobs = db
+  const jobs = await db
     .prepare(
       `SELECT j.*, b.name as branch_name, d.name as department_name,
               (SELECT COUNT(*) FROM applicants a WHERE a.job_post_id = j.id) as applicant_count
@@ -422,7 +420,7 @@ workforceRouter.get('/recruitment', requirePermission('recruitment.view'), (req,
     )
     .all(...(branchId ? [branchId] : []));
 
-  const applicants = db
+  const applicants = await db
     .prepare(
       `SELECT a.*, j.title as job_title, j.branch_id, j.department_id, b.name as branch_name
        FROM applicants a
@@ -433,7 +431,7 @@ workforceRouter.get('/recruitment', requirePermission('recruitment.view'), (req,
     )
     .all(...(branchId ? [branchId] : []));
 
-  const interviews = db
+  const interviews = await db
     .prepare(
       `SELECT i.*, a.full_name as applicant_name, j.title as job_title
        FROM interviews i
@@ -446,7 +444,7 @@ workforceRouter.get('/recruitment', requirePermission('recruitment.view'), (req,
   res.json({ jobs, applicants, interviews });
 });
 
-workforceRouter.post('/recruitment/jobs', requirePermission('recruitment.manage'), (req: AuthedRequest, res) => {
+workforceRouter.post('/recruitment/jobs', requirePermission('recruitment.manage'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     branchId: z.number().int().positive(),
     departmentId: z.number().int().positive(),
@@ -462,7 +460,7 @@ workforceRouter.post('/recruitment/jobs', requirePermission('recruitment.manage'
     return;
   }
   const d = parsed.data;
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO job_posts (branch_id, department_id, title, employment_type, salary_range, description, requirements, status, closing_date, created_at)
        VALUES (?, ?, ?, 'full_time', ?, ?, ?, 'open', ?, ?)`
@@ -471,7 +469,7 @@ workforceRouter.post('/recruitment/jobs', requirePermission('recruitment.manage'
   res.status(201).json({ id: Number(info.lastInsertRowid) });
 });
 
-workforceRouter.patch('/recruitment/applicants/:id/stage', requirePermission('recruitment.manage'), (req: AuthedRequest, res) => {
+workforceRouter.patch('/recruitment/applicants/:id/stage', requirePermission('recruitment.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
   const schema = z.object({ stage: z.enum(['applied', 'screening', 'interview', 'offer', 'hired', 'rejected']) });
   const parsed = schema.safeParse(req.body);
@@ -479,8 +477,8 @@ workforceRouter.patch('/recruitment/applicants/:id/stage', requirePermission('re
     res.status(400).json({ error: 'Invalid applicant stage.' });
     return;
   }
-  db.prepare('UPDATE applicants SET stage = ? WHERE id = ?').run(parsed.data.stage, id);
-  recordAuditLog({
+  await db.prepare('UPDATE applicants SET stage = ? WHERE id = ?').run(parsed.data.stage, id);
+  await recordAuditLog({
     user: req.user,
     action: 'recruitment.stage_updated',
     resource: 'applicants',
@@ -491,15 +489,15 @@ workforceRouter.patch('/recruitment/applicants/:id/stage', requirePermission('re
   res.json({ ok: true });
 });
 
-workforceRouter.post('/recruitment/applicants/:id/hire', requirePermission('recruitment.manage'), (req: AuthedRequest, res) => {
+workforceRouter.post('/recruitment/applicants/:id/hire', requirePermission('recruitment.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
-  const appRow = db
+  const appRow = (await db
     .prepare(
       `SELECT a.*, j.title as job_title, j.branch_id, j.department_id
        FROM applicants a JOIN job_posts j ON j.id = a.job_post_id
        WHERE a.id = ?`
     )
-    .get(id) as
+    .get(id)) as
     | { id: number; full_name: string; email: string; phone: string | null; job_title: string; branch_id: number; department_id: number }
     | undefined;
   if (!appRow) {
@@ -507,10 +505,10 @@ workforceRouter.post('/recruitment/applicants/:id/hire', requirePermission('recr
     return;
   }
 
-  const maxId = (db.prepare('SELECT COALESCE(MAX(id), 1000) as m FROM employees').get() as { m: number }).m;
-  const employeeCode = `NX-${1001 + maxId}`;
+  const maxRow = (await db.prepare('SELECT COALESCE(MAX(id), 1000) as m FROM employees').get()) as { m: number };
+  const employeeCode = `NX-${1001 + Number(maxRow.m)}`;
   const today = new Date().toISOString().slice(0, 10);
-  const info = db
+  const info = await db
     .prepare(
       `INSERT INTO employees (branch_id, department_id, employee_code, full_name, email, phone, designation, employment_type, hire_date, annual_salary, pre_tax_401k_pct, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'full_time', ?, 145000, 4.0, 'active', ?)`
@@ -526,8 +524,8 @@ workforceRouter.post('/recruitment/applicants/:id/hire', requirePermission('recr
       today,
       new Date().toISOString()
     );
-  db.prepare("UPDATE applicants SET stage = 'hired' WHERE id = ?").run(id);
-  recordAuditLog({
+  await db.prepare("UPDATE applicants SET stage = 'hired' WHERE id = ?").run(id);
+  await recordAuditLog({
     user: req.user,
     action: 'recruitment.candidate_hired',
     resource: 'employees',
@@ -541,9 +539,9 @@ workforceRouter.post('/recruitment/applicants/:id/hire', requirePermission('recr
 // ---------------------------------------------------------------------------
 // Performance Reviews, Calibration, OKR Goals & 360 Feedback
 // ---------------------------------------------------------------------------
-workforceRouter.get('/performance', requirePermission('performance.view'), (req, res) => {
+workforceRouter.get('/performance', requirePermission('performance.view'), async (req, res) => {
   const branchId = req.query.branchId ? Number(req.query.branchId) : null;
-  const reviews = db
+  const reviews = await db
     .prepare(
       `SELECT pr.*, e.employee_code, e.full_name as employee_name, e.designation, e.annual_salary,
               b.name as branch_name, d.name as department_name
@@ -556,7 +554,7 @@ workforceRouter.get('/performance', requirePermission('performance.view'), (req,
     )
     .all(...(branchId ? [branchId] : []));
 
-  const goals = db
+  const goals = await db
     .prepare(
       `SELECT g.*, e.full_name as employee_name, e.employee_code, b.name as branch_name
        FROM goals g
@@ -567,7 +565,7 @@ workforceRouter.get('/performance', requirePermission('performance.view'), (req,
     )
     .all(...(branchId ? [branchId] : []));
 
-  const feedback = db
+  const feedback = await db
     .prepare(
       `SELECT f.*, e.full_name as to_employee_name, e.designation
        FROM feedback_entries f JOIN employees e ON e.id = f.to_employee_id
@@ -578,7 +576,7 @@ workforceRouter.get('/performance', requirePermission('performance.view'), (req,
   res.json({ reviews, goals, feedback });
 });
 
-workforceRouter.post('/performance/reviews/:id/calibrate', requirePermission('performance.manage'), (req: AuthedRequest, res) => {
+workforceRouter.post('/performance/reviews/:id/calibrate', requirePermission('performance.manage'), async (req: AuthedRequest, res) => {
   const id = Number(req.params.id);
   const schema = z.object({ calibratedRating: z.number().min(1).max(5) });
   const parsed = schema.safeParse(req.body);
@@ -588,12 +586,10 @@ workforceRouter.post('/performance/reviews/:id/calibrate', requirePermission('pe
   }
   const r = parsed.data.calibratedRating;
   const bonusPct = r >= 4.7 ? 10 : r >= 4.2 ? 6 : r >= 3.5 ? 3 : 0;
-  db.prepare("UPDATE performance_reviews SET calibrated_rating = ?, bonus_pct = ?, status = 'calibrated' WHERE id = ?").run(
-    r,
-    bonusPct,
-    id
-  );
-  recordAuditLog({
+  await db
+    .prepare("UPDATE performance_reviews SET calibrated_rating = ?, bonus_pct = ?, status = 'calibrated' WHERE id = ?")
+    .run(r, bonusPct, id);
+  await recordAuditLog({
     user: req.user,
     action: 'performance.calibrated',
     resource: 'performance_reviews',
@@ -604,7 +600,7 @@ workforceRouter.post('/performance/reviews/:id/calibrate', requirePermission('pe
   res.json({ ok: true, bonusPct });
 });
 
-workforceRouter.post('/performance/goals', requirePermission('performance.view'), (req: AuthedRequest, res) => {
+workforceRouter.post('/performance/goals', requirePermission('performance.view'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     employeeId: z.number().int().positive().optional(),
     title: z.string().min(3).max(200),
@@ -617,13 +613,13 @@ workforceRouter.post('/performance/goals', requirePermission('performance.view')
     return;
   }
   const empId = parsed.data.employeeId ?? req.user!.employeeId ?? 1;
-  const info = db
+  const info = await db
     .prepare("INSERT INTO goals (employee_id, title, category, progress, target_date, status) VALUES (?, ?, ?, 15, ?, 'in_progress')")
     .run(empId, parsed.data.title, parsed.data.category, parsed.data.targetDate);
   res.status(201).json({ id: Number(info.lastInsertRowid) });
 });
 
-workforceRouter.patch('/performance/goals/:id', requirePermission('performance.view'), (req, res) => {
+workforceRouter.patch('/performance/goals/:id', requirePermission('performance.view'), async (req, res) => {
   const id = Number(req.params.id);
   const schema = z.object({ progress: z.number().min(0).max(100) });
   const parsed = schema.safeParse(req.body);
@@ -632,11 +628,11 @@ workforceRouter.patch('/performance/goals/:id', requirePermission('performance.v
     return;
   }
   const status = parsed.data.progress >= 100 ? 'completed' : 'in_progress';
-  db.prepare('UPDATE goals SET progress = ?, status = ? WHERE id = ?').run(parsed.data.progress, status, id);
+  await db.prepare('UPDATE goals SET progress = ?, status = ? WHERE id = ?').run(parsed.data.progress, status, id);
   res.json({ ok: true, status });
 });
 
-workforceRouter.post('/performance/feedback', requirePermission('performance.view'), (req: AuthedRequest, res) => {
+workforceRouter.post('/performance/feedback', requirePermission('performance.view'), async (req: AuthedRequest, res) => {
   const schema = z.object({
     toEmployeeId: z.number().int().positive(),
     category: z.enum(['Recognition', 'Leadership', 'Collaboration', 'Growth']),
@@ -647,7 +643,7 @@ workforceRouter.post('/performance/feedback', requirePermission('performance.vie
     res.status(400).json({ error: 'Provide a valid feedback message.' });
     return;
   }
-  const info = db
+  const info = await db
     .prepare('INSERT INTO feedback_entries (from_name, to_employee_id, category, message, created_at) VALUES (?, ?, ?, ?, ?)')
     .run(req.user!.fullName, parsed.data.toEmployeeId, parsed.data.category, parsed.data.message, new Date().toISOString());
   res.status(201).json({ id: Number(info.lastInsertRowid) });

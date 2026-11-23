@@ -49,43 +49,45 @@ export function rateLimit(maxRequests: number, windowMs: number) {
 // ---------------------------------------------------------------------------
 // Load User + Roles + Permissions + Linked Employee
 // ---------------------------------------------------------------------------
-export function loadUserContext(userId: number, authType: 'session' | 'api_key' = 'session', apiScopes?: string[]): AuthUserContext | null {
-  const user = db
+export async function loadUserContext(
+  userId: number,
+  authType: 'session' | 'api_key' = 'session',
+  apiScopes?: string[]
+): Promise<AuthUserContext | null> {
+  const user = await db
     .prepare('SELECT id, email, username, full_name, avatar_url, status, mfa_enabled FROM users WHERE id = ?')
-    .get(userId) as
-    | {
-        id: number;
-        email: string;
-        username: string;
-        full_name: string;
-        avatar_url: string | null;
-        status: string;
-        mfa_enabled: number;
-      }
-    | undefined;
+    .get<{
+      id: number;
+      email: string;
+      username: string;
+      full_name: string;
+      avatar_url: string | null;
+      status: string;
+      mfa_enabled: number;
+    }>(userId);
 
   if (!user || user.status !== 'active') return null;
 
-  const rolesRows = db
+  const rolesRows = await db
     .prepare(
       `SELECT r.slug FROM roles r
        JOIN user_roles ur ON ur.role_id = r.id
        WHERE ur.user_id = ?`
     )
-    .all(userId) as Array<{ slug: string }>;
+    .all<{ slug: string }>(userId);
 
-  const permRows = db
+  const permRows = await db
     .prepare(
       `SELECT DISTINCT p.slug FROM permissions p
        JOIN role_permissions rp ON rp.permission_id = p.id
        JOIN user_roles ur ON ur.role_id = rp.role_id
        WHERE ur.user_id = ?`
     )
-    .all(userId) as Array<{ slug: string }>;
+    .all<{ slug: string }>(userId);
 
-  const emp = db
+  const emp = await db
     .prepare('SELECT id, branch_id FROM employees WHERE user_id = ?')
-    .get(userId) as { id: number; branch_id: number } | undefined;
+    .get<{ id: number; branch_id: number }>(userId);
 
   return {
     id: user.id,
@@ -103,15 +105,14 @@ export function loadUserContext(userId: number, authType: 'session' | 'api_key' 
   };
 }
 
-
 const SESSION_SIGNING_KEY =
   process.env.HRM_SESSION_SECRET?.trim() || crypto.randomBytes(32).toString('hex');
 const revokedTokenHashes = new Set<string>();
 
-export function revokeSessionToken(rawToken: string): void {
+export async function revokeSessionToken(rawToken: string): Promise<void> {
   const tokenHash = sha256Hex(rawToken);
   revokedTokenHashes.add(tokenHash);
-  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+  await db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
 }
 
 function signStatelessToken(userId: number, expiresAtMs: number): string {
@@ -150,15 +151,21 @@ function verifyStatelessToken(rawToken: string): { uid: number; exp: number } | 
   }
 }
 
-export function createSessionToken(userId: number, ip: string | undefined, ua: string | undefined): string {
+export async function createSessionToken(
+  userId: number,
+  ip: string | undefined,
+  ua: string | undefined
+): Promise<string> {
   const now = new Date();
   const expiresMs = now.getTime() + 12 * 60 * 60 * 1000; // 12h session
   const rawToken = signStatelessToken(userId, expiresMs);
   const tokenHash = sha256Hex(rawToken);
-  db.prepare(
-    `INSERT INTO sessions (token_hash, user_id, mfa_verified, ip_address, user_agent, expires_at, created_at)
-     VALUES (?, ?, 1, ?, ?, ?, ?)`
-  ).run(tokenHash, userId, ip ?? '127.0.0.1', ua ?? 'browser', new Date(expiresMs).toISOString(), now.toISOString());
+  await db
+    .prepare(
+      `INSERT INTO sessions (token_hash, user_id, mfa_verified, ip_address, user_agent, expires_at, created_at)
+       VALUES (?, ?, 1, ?, ?, ?, ?)`
+    )
+    .run(tokenHash, userId, ip ?? '127.0.0.1', ua ?? 'browser', new Date(expiresMs).toISOString(), now.toISOString());
   return rawToken;
 }
 
@@ -166,29 +173,29 @@ async function resolveSessionUser(rawToken: string): Promise<AuthUserContext | n
   const tokenHash = sha256Hex(rawToken);
   if (revokedTokenHashes.has(tokenHash)) return null;
 
-  // 1. Check active SQLite session table
-  const session = db
+  // 1. Check active DB session table (PostgreSQL or SQLite)
+  const session = await db
     .prepare('SELECT user_id, expires_at FROM sessions WHERE token_hash = ?')
-    .get(tokenHash) as { user_id: number; expires_at: string } | undefined;
+    .get<{ user_id: number; expires_at: string }>(tokenHash);
 
   if (session) {
     if (Date.parse(session.expires_at) < Date.now()) {
-      db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+      await db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
       return null;
     }
     return loadUserContext(session.user_id, 'session');
   }
 
-  // 2. Stateless HMAC fallback (supports Vercel serverless cold starts)
+  // 2. Stateless HMAC fallback (supports serverless cold starts)
   const stateless = verifyStatelessToken(rawToken);
   if (stateless) {
     return loadUserContext(stateless.uid, 'session');
   }
 
-  // 3. Supabase JWT verification fallback (works seamlessly across Vercel instances)
+  // 3. Supabase JWT verification fallback
   const sbUser = await verifySupabaseAccessToken(rawToken);
   if (sbUser) {
-    const userId = findOrProvisionSupabaseUser(sbUser);
+    const userId = await findOrProvisionSupabaseUser(sbUser);
     return loadUserContext(userId, 'session');
   }
 
@@ -247,9 +254,9 @@ export function requireApiScope(requiredScope: string) {
     const hash = sha256Hex(raw);
 
     // 1. Check Scoped API Key
-    const apiKey = db
+    const apiKey = await db
       .prepare('SELECT id, scopes_json, created_by, is_active FROM api_keys WHERE key_hash = ?')
-      .get(hash) as { id: number; scopes_json: string; created_by: number | null; is_active: number } | undefined;
+      .get<{ id: number; scopes_json: string; created_by: number | null; is_active: number }>(hash);
 
     if (apiKey) {
       if (!apiKey.is_active) {
@@ -261,8 +268,8 @@ export function requireApiScope(requiredScope: string) {
         res.status(403).json({ error: `API key missing required scope: ${requiredScope}` });
         return;
       }
-      db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(new Date().toISOString(), apiKey.id);
-      const ctx = loadUserContext(apiKey.created_by ?? 1, 'api_key', scopes);
+      await db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(new Date().toISOString(), apiKey.id);
+      const ctx = await loadUserContext(apiKey.created_by ?? 1, 'api_key', scopes);
       if (ctx) req.user = ctx;
       next();
       return;
@@ -283,7 +290,7 @@ export function requireApiScope(requiredScope: string) {
 // ---------------------------------------------------------------------------
 // Tamper-Evident Hash-Chained Audit Log Writer
 // ---------------------------------------------------------------------------
-export function recordAuditLog(params: {
+export async function recordAuditLog(params: {
   user?: AuthUserContext | null;
   action: string;
   resource: string;
@@ -291,10 +298,10 @@ export function recordAuditLog(params: {
   before?: unknown;
   after?: unknown;
   ipAddress?: string;
-}): void {
-  const last = db
+}): Promise<void> {
+  const last = await db
     .prepare('SELECT entry_hash FROM audit_logs ORDER BY id DESC LIMIT 1')
-    .get() as { entry_hash: string } | undefined;
+    .get<{ entry_hash: string }>();
 
   const prevHash = last?.entry_hash ?? 'GENESIS';
   const createdAt = new Date().toISOString();
@@ -315,20 +322,22 @@ export function recordAuditLog(params: {
     prevHash,
   });
 
-  db.prepare(
-    `INSERT INTO audit_logs (user_id, actor_email, action, resource, resource_id, before_data, after_data, ip_address, prev_hash, entry_hash, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    params.user?.id ?? null,
-    params.user?.email ?? 'system@nexushrm.io',
-    params.action,
-    params.resource,
-    resourceId,
-    beforeData,
-    afterData,
-    ipAddress,
-    prevHash,
-    entryHash,
-    createdAt
-  );
+  await db
+    .prepare(
+      `INSERT INTO audit_logs (user_id, actor_email, action, resource, resource_id, before_data, after_data, ip_address, prev_hash, entry_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      params.user?.id ?? null,
+      params.user?.email ?? 'system@nexushrm.io',
+      params.action,
+      params.resource,
+      resourceId,
+      beforeData,
+      afterData,
+      ipAddress,
+      prevHash,
+      entryHash,
+      createdAt
+    );
 }
