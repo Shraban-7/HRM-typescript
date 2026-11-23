@@ -16,6 +16,7 @@ export default defineConfig({
       'react/jsx-dev-runtime',
       'lucide-react',
       'recharts',
+      '@supabase/supabase-js',
     ],
     holdUntilCrawlEnd: true,
   },

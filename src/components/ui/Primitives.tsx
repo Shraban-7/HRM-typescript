@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -7,6 +7,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
+import { resolveAvatarUrl } from '../../lib/avatars';
 
 export function PageHeader({
   title,
@@ -162,7 +163,13 @@ export function Avatar({
   name: string;
   size?: 'sm' | 'md' | 'lg';
 }) {
+  const resolvedSrc = resolveAvatarUrl(src);
   const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [resolvedSrc]);
+
   const dims = size === 'sm' ? 'w-7 h-7 text-[11px]' : size === 'lg' ? 'w-11 h-11 text-sm' : 'w-8 h-8 text-xs';
   const initials = name
     .split(' ')
@@ -171,10 +178,10 @@ export function Avatar({
     .map((p) => p[0]?.toUpperCase())
     .join('');
 
-  if (src && !failed) {
+  if (resolvedSrc && !failed) {
     return (
       <img
-        src={src}
+        src={resolvedSrc}
         alt={name}
         referrerPolicy="no-referrer"
         onError={() => setFailed(true)}

@@ -17,3 +17,16 @@ Full-stack TypeScript enterprise HRM workspace built with **React 19**, **Tailwi
 - `npm run build` — Compile production frontend bundle
 - `npm run lint` — TypeScript static check (`tsc --noEmit`)
 - `npm test` — Run pure domain unit test suite (`node:test`)
+
+## Deploying to Vercel with Supabase Login
+
+Vercel routes all `/api/*` traffic to the serverless Express handler in `api/index.ts` via `vercel.json`.
+
+Configure these Environment Variables in your Vercel project settings to enable Supabase Authentication:
+
+- `VITE_SUPABASE_URL` — Your Supabase Project URL (`https://<project-ref>.supabase.co`)
+- `VITE_SUPABASE_ANON_KEY` — Your Supabase public `anon` key
+- `SUPABASE_URL` — Same Supabase Project URL (used by the server to verify Supabase JWTs)
+- `SUPABASE_ANON_KEY` — Same Supabase `anon` key (used by the server to verify Supabase JWTs)
+- `HRM_ADMIN_EMAIL` *(optional)* — Email address automatically granted `super_admin` when signing in via Supabase
+- `HRM_SESSION_SECRET` *(optional)* — Random 32+ byte secret for signing stateless session tokens across serverless instances

@@ -18,7 +18,13 @@ import {
   rateLimit,
   recordAuditLog,
   requireAuth,
+  revokeSessionToken,
 } from '../middleware/auth';
+import {
+  findOrProvisionSupabaseUser,
+  isSupabaseConfigured,
+  verifySupabaseAccessToken,
+} from '../services/supabaseAuth';
 
 export const authRouter = Router();
 
@@ -38,10 +44,52 @@ authRouter.get('/status', (_req, res) => {
   const envPasscodeSet = Boolean(process.env.HRM_ADMIN_PASSCODE && process.env.HRM_ADMIN_PASSCODE.trim().length > 0);
   res.json({
     adminClaimRequired: !envPasscodeSet && claimed?.value !== '1',
+    supabaseEnabled: isSupabaseConfigured(),
     companyName:
       (db.prepare("SELECT value FROM company_settings WHERE key = 'company_name'").get() as { value: string } | undefined)
         ?.value ?? 'Nexus Technologies Inc.',
   });
+});
+
+// Exchange a verified Supabase Auth JWT for a linked Nexus HRM workspace profile
+authRouter.post('/supabase-session', rateLimit(30, 60_000), async (req, res) => {
+  if (!isSupabaseConfigured()) {
+    res.status(503).json({
+      error: 'Supabase authentication is not configured on the server. Set SUPABASE_URL and SUPABASE_ANON_KEY.',
+    });
+    return;
+  }
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Supabase access token required.' });
+    return;
+  }
+
+  const rawToken = authHeader.slice(7).trim();
+  const sbUser = await verifySupabaseAccessToken(rawToken);
+  if (!sbUser) {
+    res.status(401).json({ error: 'Invalid or expired Supabase session token.' });
+    return;
+  }
+
+  const userId = findOrProvisionSupabaseUser(sbUser);
+  const ctx = loadUserContext(userId, 'session');
+  if (!ctx) {
+    res.status(403).json({ error: 'Linked HRM account is inactive.' });
+    return;
+  }
+
+  recordAuditLog({
+    user: ctx,
+    action: 'auth.supabase_login',
+    resource: 'sessions',
+    resourceId: String(userId),
+    after: { provider: 'supabase', email: sbUser.email },
+    ipAddress: req.ip,
+  });
+
+  res.json({ token: rawToken, user: ctx });
 });
 
 // First-run admin password claim (atomically locks once claimed or if HRM_ADMIN_PASSCODE is set)
@@ -311,7 +359,7 @@ authRouter.get('/me', requireAuth, (req: AuthedRequest, res) => {
 authRouter.post('/logout', requireAuth, (req: AuthedRequest, res) => {
   const rawToken = req.headers.authorization?.slice(7).trim();
   if (rawToken) {
-    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256Hex(rawToken));
+    revokeSessionToken(rawToken);
   }
   recordAuditLog({
     user: req.user,

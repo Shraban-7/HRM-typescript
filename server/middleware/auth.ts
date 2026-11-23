@@ -2,6 +2,10 @@ import crypto from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { db } from '../db';
 import { computeAuditEntryHash, redactSensitiveData, sha256Hex } from '../domain/index';
+import {
+  findOrProvisionSupabaseUser,
+  verifySupabaseAccessToken,
+} from '../services/supabaseAuth';
 
 export interface AuthUserContext {
   id: number;
@@ -99,22 +103,102 @@ export function loadUserContext(userId: number, authType: 'session' | 'api_key' 
   };
 }
 
-export function createSessionToken(userId: number, ip: string | undefined, ua: string | undefined): string {
-  const rawToken = `nxs_${crypto.randomBytes(32).toString('hex')}`;
+
+const SESSION_SIGNING_KEY =
+  process.env.HRM_SESSION_SECRET?.trim() || crypto.randomBytes(32).toString('hex');
+const revokedTokenHashes = new Set<string>();
+
+export function revokeSessionToken(rawToken: string): void {
   const tokenHash = sha256Hex(rawToken);
+  revokedTokenHashes.add(tokenHash);
+  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+}
+
+function signStatelessToken(userId: number, expiresAtMs: number): string {
+  const payload = Buffer.from(
+    JSON.stringify({ uid: userId, exp: expiresAtMs, jti: crypto.randomBytes(8).toString('hex') })
+  ).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SESSION_SIGNING_KEY)
+    .update(payload)
+    .digest('base64url');
+  return `nxs2.${payload}.${sig}`;
+}
+
+function verifyStatelessToken(rawToken: string): { uid: number; exp: number } | null {
+  if (!rawToken.startsWith('nxs2.')) return null;
+  const parts = rawToken.split('.');
+  if (parts.length !== 3) return null;
+  const [, payload, sig] = parts;
+  const expected = crypto
+    .createHmac('sha256', SESSION_SIGNING_KEY)
+    .update(payload)
+    .digest('base64url');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+      uid?: unknown;
+      exp?: unknown;
+    };
+    if (typeof parsed.uid !== 'number' || typeof parsed.exp !== 'number') return null;
+    if (parsed.exp < Date.now()) return null;
+    return { uid: parsed.uid, exp: parsed.exp };
+  } catch {
+    return null;
+  }
+}
+
+export function createSessionToken(userId: number, ip: string | undefined, ua: string | undefined): string {
   const now = new Date();
-  const expires = new Date(now.getTime() + 12 * 60 * 60 * 1000); // 12h session
+  const expiresMs = now.getTime() + 12 * 60 * 60 * 1000; // 12h session
+  const rawToken = signStatelessToken(userId, expiresMs);
+  const tokenHash = sha256Hex(rawToken);
   db.prepare(
     `INSERT INTO sessions (token_hash, user_id, mfa_verified, ip_address, user_agent, expires_at, created_at)
      VALUES (?, ?, 1, ?, ?, ?, ?)`
-  ).run(tokenHash, userId, ip ?? '127.0.0.1', ua ?? 'browser', expires.toISOString(), now.toISOString());
+  ).run(tokenHash, userId, ip ?? '127.0.0.1', ua ?? 'browser', new Date(expiresMs).toISOString(), now.toISOString());
   return rawToken;
+}
+
+async function resolveSessionUser(rawToken: string): Promise<AuthUserContext | null> {
+  const tokenHash = sha256Hex(rawToken);
+  if (revokedTokenHashes.has(tokenHash)) return null;
+
+  // 1. Check active SQLite session table
+  const session = db
+    .prepare('SELECT user_id, expires_at FROM sessions WHERE token_hash = ?')
+    .get(tokenHash) as { user_id: number; expires_at: string } | undefined;
+
+  if (session) {
+    if (Date.parse(session.expires_at) < Date.now()) {
+      db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+      return null;
+    }
+    return loadUserContext(session.user_id, 'session');
+  }
+
+  // 2. Stateless HMAC fallback (supports Vercel serverless cold starts)
+  const stateless = verifyStatelessToken(rawToken);
+  if (stateless) {
+    return loadUserContext(stateless.uid, 'session');
+  }
+
+  // 3. Supabase JWT verification fallback (works seamlessly across Vercel instances)
+  const sbUser = await verifySupabaseAccessToken(rawToken);
+  if (sbUser) {
+    const userId = findOrProvisionSupabaseUser(sbUser);
+    return loadUserContext(userId, 'session');
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
 // Bearer Session Authentication Middleware
 // ---------------------------------------------------------------------------
-export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
+export async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Authentication required' });
@@ -122,23 +206,9 @@ export function requireAuth(req: AuthedRequest, res: Response, next: NextFunctio
   }
 
   const rawToken = authHeader.slice(7).trim();
-  const tokenHash = sha256Hex(rawToken);
-
-  const session = db
-    .prepare('SELECT user_id, expires_at FROM sessions WHERE token_hash = ?')
-    .get(tokenHash) as { user_id: number; expires_at: string } | undefined;
-
-  if (!session || Date.parse(session.expires_at) < Date.now()) {
-    if (session) {
-      db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
-    }
-    res.status(401).json({ error: 'Session expired or invalid' });
-    return;
-  }
-
-  const ctx = loadUserContext(session.user_id, 'session');
+  const ctx = await resolveSessionUser(rawToken);
   if (!ctx) {
-    res.status(401).json({ error: 'Account unavailable' });
+    res.status(401).json({ error: 'Session expired or invalid' });
     return;
   }
 
@@ -167,7 +237,7 @@ export function requirePermission(permissionSlug: string) {
 // Scoped Public API v1 Key OR Authenticated Session Guard
 // ---------------------------------------------------------------------------
 export function requireApiScope(requiredScope: string) {
-  return (req: AuthedRequest, res: Response, next: NextFunction): void => {
+  return async (req: AuthedRequest, res: Response, next: NextFunction): Promise<void> => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       res.status(401).json({ error: 'Bearer API key required' });
@@ -198,17 +268,12 @@ export function requireApiScope(requiredScope: string) {
       return;
     }
 
-    // 2. Fallback to active Super Admin / Developer session token for interactive API Explorer
-    const session = db
-      .prepare('SELECT user_id, expires_at FROM sessions WHERE token_hash = ?')
-      .get(hash) as { user_id: number; expires_at: string } | undefined;
-    if (session && Date.parse(session.expires_at) >= Date.now()) {
-      const ctx = loadUserContext(session.user_id, 'session');
-      if (ctx && (ctx.roles.includes('super_admin') || ctx.permissions.includes('developer.manage'))) {
-        req.user = ctx;
-        next();
-        return;
-      }
+    // 2. Fallback to active Super Admin / Developer session (including Supabase JWT)
+    const ctx = await resolveSessionUser(raw);
+    if (ctx && (ctx.roles.includes('super_admin') || ctx.permissions.includes('developer.manage'))) {
+      req.user = ctx;
+      next();
+      return;
     }
 
     res.status(401).json({ error: 'Invalid API key or session token' });

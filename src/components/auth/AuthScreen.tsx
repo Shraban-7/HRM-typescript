@@ -1,6 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowRight, Briefcase, KeyRound, Lock, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Briefcase, KeyRound, Lock, ShieldCheck, UserPlus } from 'lucide-react';
 import { apiRequest, ApiError } from '../../lib/api';
+import {
+  AVATAR_BRANCH_MANAGER,
+  AVATAR_SENIOR_ENGINEER,
+  AVATAR_VP_PEOPLE,
+} from '../../lib/avatars';
+import { isSupabaseClientConfigured, supabase } from '../../lib/supabase';
 import type { AuthUser } from '../../types/hrm';
 import { Avatar } from '../ui/Primitives';
 
@@ -23,7 +29,7 @@ const PERSONAS: Array<{
     title: 'VP of People & Security',
     email: 'admin@nexushrm.io',
     scope: 'Super Admin · Full Governance & API',
-    avatar: '/src/assets/images/avatar_vp_people_1795446546985.jpg',
+    avatar: AVATAR_VP_PEOPLE,
   },
   {
     role: 'hr_admin',
@@ -39,7 +45,7 @@ const PERSONAS: Array<{
     title: 'Director of Engineering',
     email: 'manager@nexushrm.io',
     scope: 'Branch Manager · Austin HQ Approvals',
-    avatar: '/src/assets/images/avatar_branch_manager_1795446547221.jpg',
+    avatar: AVATAR_BRANCH_MANAGER,
   },
   {
     role: 'employee',
@@ -47,11 +53,20 @@ const PERSONAS: Array<{
     title: 'Staff Software Engineer',
     email: 'maya.lin@nexushrm.io',
     scope: 'Employee · Self-Service & Payslips',
-    avatar: '/src/assets/images/avatar_senior_engineer_1795446544652.jpg',
+    avatar: AVATAR_SENIOR_ENGINEER,
   },
 ];
 
 export function AuthScreen({ onAuthenticated, onOpenCareers }: AuthScreenProps) {
+  const [authProvider, setAuthProvider] = useState<'supabase' | 'workspace'>(
+    isSupabaseClientConfigured ? 'supabase' : 'workspace'
+  );
+  const [supabaseTab, setSupabaseTab] = useState<'signin' | 'signup'>('signin');
+  const [sbEmail, setSbEmail] = useState('');
+  const [sbPassword, setSbPassword] = useState('');
+  const [sbFullName, setSbFullName] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+
   const [identifier, setIdentifier] = useState('admin@nexushrm.io');
   const [password, setPassword] = useState('NexusHR#2026');
   const [error, setError] = useState<string | null>(null);
@@ -68,14 +83,110 @@ export function AuthScreen({ onAuthenticated, onOpenCareers }: AuthScreenProps) 
   const [claimSuccess, setClaimSuccess] = useState<string | null>(null);
 
   useEffect(() => {
-    apiRequest<{ adminClaimRequired: boolean }>('/api/auth/status')
+    apiRequest<{ adminClaimRequired: boolean; supabaseEnabled?: boolean }>('/api/auth/status')
       .then((res) => setAdminClaimRequired(res.adminClaimRequired))
       .catch(() => {});
   }, []);
 
+  // Exchange any incoming Supabase redirect/email-confirmation session automatically
+  useEffect(() => {
+    if (!supabase) return;
+    let active = true;
+    supabase.auth
+      .getSession()
+      .then(async ({ data }) => {
+        if (!active || !data.session?.access_token) return;
+        const res = await apiRequest<{ token: string; user: AuthUser }>(
+          '/api/auth/supabase-session',
+          {
+            method: 'POST',
+            bearerOverride: data.session.access_token,
+          }
+        );
+        if (active) {
+          onAuthenticated(res.token, res.user);
+        }
+      })
+      .catch(() => {
+        // Leave user on sign-in screen if session exchange fails
+      });
+    return () => {
+      active = false;
+    };
+  }, [onAuthenticated]);
+
+  async function handleSupabaseSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!supabase) {
+      setError('Supabase Auth is not configured for this environment.');
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    setLoading(true);
+    try {
+      if (supabaseTab === 'signup') {
+        const { data, error: signUpErr } = await supabase.auth.signUp({
+          email: sbEmail.trim(),
+          password: sbPassword,
+          options: {
+            data: sbFullName.trim() ? { full_name: sbFullName.trim() } : undefined,
+          },
+        });
+        if (signUpErr) {
+          setError(signUpErr.message);
+          return;
+        }
+        if (data.session?.access_token) {
+          const res = await apiRequest<{ token: string; user: AuthUser }>(
+            '/api/auth/supabase-session',
+            {
+              method: 'POST',
+              bearerOverride: data.session.access_token,
+            }
+          );
+          onAuthenticated(res.token, res.user);
+        } else {
+          setNotice(
+            'Account created. Check your email inbox to confirm your address, then sign in.'
+          );
+          setSupabaseTab('signin');
+          setSbPassword('');
+        }
+      } else {
+        const { data, error: signInErr } = await supabase.auth.signInWithPassword({
+          email: sbEmail.trim(),
+          password: sbPassword,
+        });
+        if (signInErr) {
+          setError(signInErr.message);
+          return;
+        }
+        const accessToken = data.session?.access_token;
+        if (!accessToken) {
+          setError('Supabase did not return an active session. Confirm your email and try again.');
+          return;
+        }
+        const res = await apiRequest<{ token: string; user: AuthUser }>(
+          '/api/auth/supabase-session',
+          {
+            method: 'POST',
+            bearerOverride: accessToken,
+          }
+        );
+        onAuthenticated(res.token, res.user);
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Unable to complete Supabase sign in.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setNotice(null);
     setLoading(true);
     try {
       const res = await apiRequest<
@@ -118,6 +229,7 @@ export function AuthScreen({ onAuthenticated, onOpenCareers }: AuthScreenProps) 
 
   async function handlePersonaSignIn(role: 'super_admin' | 'hr_admin' | 'manager' | 'employee') {
     setError(null);
+    setNotice(null);
     setLoading(true);
     try {
       const res = await apiRequest<{ token: string; user: AuthUser }>('/api/auth/demo-switch', {
@@ -151,6 +263,8 @@ export function AuthScreen({ onAuthenticated, onOpenCareers }: AuthScreenProps) 
     }
   }
 
+  const showingSupabase = isSupabaseClientConfigured && authProvider === 'supabase' && !mfaChallengeToken;
+
   return (
     <div className="min-h-screen bg-[#FAFAFB] dark:bg-[#0B0F17] flex flex-col">
       {/* Clean 3-Zone Top Bar Contract */}
@@ -181,19 +295,25 @@ export function AuthScreen({ onAuthenticated, onOpenCareers }: AuthScreenProps) 
       </header>
 
       <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-10 lg:py-14 grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
-        {/* Left: Credential & MFA Sign-In */}
+        {/* Left: Supabase Auth / Credential & MFA Sign-In */}
         <section className="lg:col-span-5 bg-white dark:bg-[#111827] border border-neutral-200 dark:border-neutral-800 rounded-lg p-7">
           <div className="mb-6">
             <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
               Nexus Technologies Inc.
             </p>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
-              {mfaChallengeToken ? 'Two-Factor Verification' : 'Sign in to Nexus HRM'}
+              {mfaChallengeToken
+                ? 'Two-Factor Verification'
+                : showingSupabase && supabaseTab === 'signup'
+                  ? 'Create your HRM account'
+                  : 'Sign in to Nexus HRM'}
             </h1>
             <p className="mt-1.5 text-sm text-neutral-500 dark:text-neutral-400">
               {mfaChallengeToken
                 ? 'Enter the 6-digit code from your authenticator app or one of your backup recovery codes.'
-                : 'Enterprise people operations, multi-branch payroll, and compliance governance.'}
+                : showingSupabase
+                  ? 'Authenticated with Supabase Identity and synced with Nexus HRM role permissions.'
+                  : 'Enterprise people operations, multi-branch payroll, and compliance governance.'}
             </p>
           </div>
 
@@ -206,57 +326,211 @@ export function AuthScreen({ onAuthenticated, onOpenCareers }: AuthScreenProps) 
             </div>
           )}
 
-          {claimSuccess && (
+          {(claimSuccess || notice) && (
             <div className="mb-4 px-3.5 py-2.5 text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 rounded-md">
-              {claimSuccess}
+              {notice ?? claimSuccess}
             </div>
           )}
 
-          {!mfaChallengeToken ? (
-            <form onSubmit={handleLogin} className="space-y-4">
-              <div>
-                <label
-                  htmlFor="login-identifier"
-                  className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1.5"
-                >
-                  Work Email or Username
-                </label>
-                <input
-                  id="login-identifier"
-                  type="text"
-                  required
-                  value={identifier}
-                  onChange={(e) => setIdentifier(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-md text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-600/30 focus:border-blue-600"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="login-password"
-                  className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1.5"
-                >
-                  Password
-                </label>
-                <input
-                  id="login-password"
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-md text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-600/30 focus:border-blue-600"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-md transition-colors cursor-pointer"
+          {showingSupabase ? (
+            <div className="space-y-4">
+              <div
+                role="tablist"
+                aria-label="Supabase authentication mode"
+                className="grid grid-cols-2 gap-1 p-1 bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg"
               >
-                <Lock className="w-4 h-4" />
-                <span>{loading ? 'Signing in...' : 'Sign In'}</span>
-              </button>
-            </form>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={supabaseTab === 'signin'}
+                  onClick={() => {
+                    setSupabaseTab('signin');
+                    setError(null);
+                  }}
+                  className={`py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                    supabaseTab === 'signin'
+                      ? 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-50 shadow-xs'
+                      : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200'
+                  }`}
+                >
+                  Sign In
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={supabaseTab === 'signup'}
+                  onClick={() => {
+                    setSupabaseTab('signup');
+                    setError(null);
+                  }}
+                  className={`py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                    supabaseTab === 'signup'
+                      ? 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-50 shadow-xs'
+                      : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200'
+                  }`}
+                >
+                  Create Account
+                </button>
+              </div>
+
+              <form onSubmit={handleSupabaseSubmit} className="space-y-4">
+                {supabaseTab === 'signup' && (
+                  <div>
+                    <label
+                      htmlFor="supabase-fullname"
+                      className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1.5"
+                    >
+                      Full Name
+                    </label>
+                    <input
+                      id="supabase-fullname"
+                      type="text"
+                      required
+                      placeholder="Jordan Taylor"
+                      value={sbFullName}
+                      onChange={(e) => setSbFullName(e.target.value)}
+                      className="w-full px-3 py-2 text-sm bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-md text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-600/30 focus:border-blue-600"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label
+                    htmlFor="supabase-email"
+                    className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1.5"
+                  >
+                    Work Email
+                  </label>
+                  <input
+                    id="supabase-email"
+                    type="email"
+                    required
+                    autoComplete="email"
+                    placeholder="you@company.com"
+                    value={sbEmail}
+                    onChange={(e) => setSbEmail(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-md text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-600/30 focus:border-blue-600"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="supabase-password"
+                    className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1.5"
+                  >
+                    Password
+                  </label>
+                  <input
+                    id="supabase-password"
+                    type="password"
+                    required
+                    minLength={supabaseTab === 'signup' ? 8 : 1}
+                    autoComplete={supabaseTab === 'signup' ? 'new-password' : 'current-password'}
+                    value={sbPassword}
+                    onChange={(e) => setSbPassword(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-md text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-600/30 focus:border-blue-600"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-md transition-colors cursor-pointer"
+                >
+                  {supabaseTab === 'signup' ? (
+                    <UserPlus className="w-4 h-4" />
+                  ) : (
+                    <Lock className="w-4 h-4" />
+                  )}
+                  <span>
+                    {loading
+                      ? supabaseTab === 'signup'
+                        ? 'Creating account...'
+                        : 'Signing in...'
+                      : supabaseTab === 'signup'
+                        ? 'Create Account with Supabase'
+                        : 'Sign In with Supabase'}
+                  </span>
+                </button>
+              </form>
+
+              <div className="pt-3 border-t border-neutral-200 dark:border-neutral-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthProvider('workspace');
+                    setError(null);
+                    setNotice(null);
+                  }}
+                  className="text-xs font-medium text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 cursor-pointer"
+                >
+                  Use local workspace credentials instead
+                </button>
+              </div>
+            </div>
+          ) : !mfaChallengeToken ? (
+            <>
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                  <label
+                    htmlFor="login-identifier"
+                    className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1.5"
+                  >
+                    Work Email or Username
+                  </label>
+                  <input
+                    id="login-identifier"
+                    type="text"
+                    required
+                    value={identifier}
+                    onChange={(e) => setIdentifier(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-md text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-600/30 focus:border-blue-600"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="login-password"
+                    className="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1.5"
+                  >
+                    Password
+                  </label>
+                  <input
+                    id="login-password"
+                    type="password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-md text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-600/30 focus:border-blue-600"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-60 rounded-md transition-colors cursor-pointer"
+                >
+                  <Lock className="w-4 h-4" />
+                  <span>{loading ? 'Signing in...' : 'Sign In'}</span>
+                </button>
+              </form>
+
+              {isSupabaseClientConfigured && (
+                <div className="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthProvider('supabase');
+                      setError(null);
+                      setNotice(null);
+                    }}
+                    className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-pointer"
+                  >
+                    Back to Supabase Sign In
+                  </button>
+                </div>
+              )}
+            </>
           ) : (
             <form onSubmit={handleMfaVerify} className="space-y-4">
               <div>
@@ -300,7 +574,7 @@ export function AuthScreen({ onAuthenticated, onOpenCareers }: AuthScreenProps) 
             </form>
           )}
 
-          {adminClaimRequired && !mfaChallengeToken && (
+          {adminClaimRequired && !mfaChallengeToken && !showingSupabase && (
             <div className="mt-6 pt-5 border-t border-neutral-200 dark:border-neutral-800">
               {!showClaimForm ? (
                 <button

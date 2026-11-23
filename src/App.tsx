@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { CheckCircle2, X } from 'lucide-react';
 import { apiRequest, setAuthToken } from './lib/api';
+import { signOutSupabase } from './lib/supabase';
 import type { AuthUser, Branch, NavSection } from './types/hrm';
 import { AuthScreen } from './components/auth/AuthScreen';
 import { AppShell } from './components/layout/AppShell';
@@ -98,7 +99,10 @@ export function App() {
 
   async function handleLogout() {
     try {
-      await apiRequest('/api/auth/logout', { method: 'POST' });
+      await Promise.all([
+        apiRequest('/api/auth/logout', { method: 'POST' }),
+        signOutSupabase(),
+      ]);
     } catch {
       // ignore
     }

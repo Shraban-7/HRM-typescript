@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {
@@ -9,7 +10,21 @@ import {
   sha256Hex,
 } from './domain/index';
 
-const DB_PATH = process.env.HRM_DB_PATH || path.resolve(process.cwd(), 'data', 'nexus-hrm.sqlite');
+function resolveDbPath(): string {
+  if (process.env.HRM_DB_PATH) return process.env.HRM_DB_PATH;
+  if (process.env.VERCEL) {
+    return path.join(os.tmpdir(), 'nexus-hrm.sqlite');
+  }
+  const localPath = path.resolve(process.cwd(), 'data', 'nexus-hrm.sqlite');
+  try {
+    fs.mkdirSync(path.dirname(localPath), { recursive: true });
+    return localPath;
+  } catch {
+    return path.join(os.tmpdir(), 'nexus-hrm.sqlite');
+  }
+}
+
+const DB_PATH = resolveDbPath();
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 export const db = new DatabaseSync(DB_PATH);
