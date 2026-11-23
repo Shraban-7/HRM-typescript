@@ -12,6 +12,15 @@ types.setTypeParser(1700, (val: string) => parseFloat(val));
 
 export type DatabaseMode = 'supabase-postgres' | 'sqlite';
 
+export class DatabaseConfigError extends Error {
+  readonly code: string;
+  constructor(message: string, code = 'database_not_configured') {
+    super(message);
+    this.name = 'DatabaseConfigError';
+    this.code = code;
+  }
+}
+
 export interface RunResult {
   lastInsertRowid: number;
   changes: number;
@@ -50,23 +59,41 @@ export function getDatabaseMode(): DatabaseMode {
   return getPostgresConnectionString() ? 'supabase-postgres' : 'sqlite';
 }
 
+function buildPgPoolConfig(connectionString: string): pg.PoolConfig {
+  const parsed = new URL(connectionString);
+  const host = parsed.hostname;
+  const port = parsed.port ? Number(parsed.port) : 5432;
+  const user = decodeURIComponent(parsed.username);
+  const password = decodeURIComponent(parsed.password);
+  const database = parsed.pathname.replace(/^\/+/, '') || 'postgres';
+  const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+
+  // Use explicit object config so Supabase ?sslmode=require query params do NOT override
+  // rejectUnauthorized: false and cause SELF_SIGNED_CERT_IN_CHAIN 500 errors on Vercel.
+  return {
+    host,
+    port,
+    user,
+    password,
+    database,
+    max: process.env.VERCEL ? 4 : 10,
+    idleTimeoutMillis: 20_000,
+    connectionTimeoutMillis: 15_000,
+    ssl: isLocalHost ? false : { rejectUnauthorized: false },
+  };
+}
+
 function getPgPool(): pg.Pool {
   if (!globalThis._nexusPgPool) {
     const connectionString = getPostgresConnectionString();
     if (!connectionString) {
-      throw new Error('Supabase PostgreSQL connection string (DATABASE_URL or SUPABASE_DB_URL) is not configured.');
+      throw new DatabaseConfigError(
+        'PostgreSQL DATABASE_URL or SUPABASE_DB_URL is not configured.',
+        'database_not_configured'
+      );
     }
 
-    const isLocalHost =
-      connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
-
-    globalThis._nexusPgPool = new Pool({
-      connectionString,
-      max: 10,
-      idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 15_000,
-      ssl: isLocalHost ? false : { rejectUnauthorized: false },
-    });
+    globalThis._nexusPgPool = new Pool(buildPgPoolConfig(connectionString));
 
     globalThis._nexusPgPool.on('error', (err) => {
       console.error('[Nexus HRM Postgres Pool Error]', err.message);
@@ -91,11 +118,21 @@ function resolveSqlitePath(): string {
 
 async function getSqliteDb(): Promise<SqliteDbLike> {
   if (!globalThis._nexusSqliteDb) {
-    // Dynamic import keeps node:sqlite out of Vercel/Supabase PostgreSQL runtimes
-    const sqliteMod = await import('node:sqlite');
+    let sqliteMod: { DatabaseSync: new (filePath: string) => unknown };
+    try {
+      // Dynamic import keeps node:sqlite out of Vercel/Supabase PostgreSQL runtimes
+      sqliteMod = (await import('node:sqlite')) as unknown as {
+        DatabaseSync: new (filePath: string) => unknown;
+      };
+    } catch {
+      throw new DatabaseConfigError(
+        'DATABASE_URL (PostgreSQL connection string) is required in this serverless environment because built-in node:sqlite is unavailable on this Node.js runtime. Set DATABASE_URL in Vercel Environment Variables.',
+        'database_not_configured'
+      );
+    }
     const dbPath = resolveSqlitePath();
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    const instance = new sqliteMod.DatabaseSync(dbPath) as unknown as SqliteDbLike;
+    const instance = new sqliteMod.DatabaseSync(dbPath) as SqliteDbLike;
     instance.exec('PRAGMA journal_mode = WAL;');
     instance.exec('PRAGMA foreign_keys = ON;');
     globalThis._nexusSqliteDb = instance;
@@ -112,11 +149,38 @@ export const db = {
     if (getDatabaseMode() === 'supabase-postgres') {
       const pool = getPgPool();
       const pgDdl = convertSqliteDdlToPostgres(ddlSql);
-      await pool.query(pgDdl);
+      // Execute individual DDL statements cleanly for PgBouncer transaction pooler compatibility
+      const statements = pgDdl
+        .split(/;\s*\n/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      for (const stmt of statements) {
+        await pool.query(stmt);
+      }
       return;
     }
     const sqlite = await getSqliteDb();
     sqlite.exec(ddlSql);
+  },
+
+  async withSeedLock<T>(fn: () => Promise<T>): Promise<T> {
+    if (getDatabaseMode() === 'supabase-postgres') {
+      const pool = getPgPool();
+      const lockClient = await pool.connect();
+      const LOCK_ID = 84729104;
+      try {
+        await lockClient.query('SELECT pg_advisory_lock($1)', [LOCK_ID]);
+        return await fn();
+      } finally {
+        try {
+          await lockClient.query('SELECT pg_advisory_unlock($1)', [LOCK_ID]);
+        } catch {
+          // ignore unlock error on closed socket
+        }
+        lockClient.release();
+      }
+    }
+    return fn();
   },
 
   prepare(sql: string): AsyncPreparedStatement {

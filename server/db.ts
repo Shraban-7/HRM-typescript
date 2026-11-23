@@ -525,13 +525,15 @@ declare global {
 
 export function initDatabase(): Promise<void> {
   if (!globalThis._nexusDbInitPromise) {
-    globalThis._nexusDbInitPromise = (async () => {
-      await db.exec(SCHEMA_DDL);
-      await seedIfEmpty();
-    })().catch((err) => {
-      globalThis._nexusDbInitPromise = undefined;
-      throw err;
-    });
+    globalThis._nexusDbInitPromise = db
+      .withSeedLock(async () => {
+        await db.exec(SCHEMA_DDL);
+        await seedIfEmpty();
+      })
+      .catch((err) => {
+        globalThis._nexusDbInitPromise = undefined;
+        throw err;
+      });
   }
   return globalThis._nexusDbInitPromise;
 }

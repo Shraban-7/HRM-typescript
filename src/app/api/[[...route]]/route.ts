@@ -61,14 +61,16 @@ async function handleWithExpress(request: NextRequest): Promise<NextResponse> {
   incoming._read = () => undefined;
 
   const contentType = headers['content-type'] ?? '';
-  if (rawBody.length > 0 && contentType.includes('application/json')) {
+  if (rawBody.length === 0) {
+    Object.assign(incoming, { body: {}, _body: true });
+  } else if (contentType.includes('application/json')) {
     try {
       const parsed = JSON.parse(rawBody.toString('utf8'));
       Object.assign(incoming, { body: parsed, _body: true });
     } catch {
       return NextResponse.json({ error: 'Invalid JSON request payload.' }, { status: 400 });
     }
-  } else if (rawBody.length > 0) {
+  } else {
     incoming.push(rawBody);
   }
   incoming.push(null);

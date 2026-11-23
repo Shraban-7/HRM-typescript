@@ -200,7 +200,12 @@ coreRouter.get('/dashboard', async (req: AuthedRequest, res) => {
   }
 
   const recentAudit = await db
-    .prepare('SELECT id, actor_email, action, resource, resource_id, created_at FROM audit_logs ORDER BY id DESC LIMIT 8')
+    .prepare(
+      `SELECT id, actor_email, action, resource, resource_id, before_data, after_data, ip_address, entry_hash, created_at
+       FROM audit_logs
+       ORDER BY id DESC
+       LIMIT 50`
+    )
     .all();
 
   const unreadNotifications =

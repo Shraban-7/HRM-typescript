@@ -5,7 +5,7 @@ const nextConfig: NextConfig = {
     unoptimized: true,
   },
   devIndicators: false,
-  serverExternalPackages: ['pg', 'express'],
+  serverExternalPackages: ['pg', 'express', '@google/genai'],
 };
 
 export default nextConfig;

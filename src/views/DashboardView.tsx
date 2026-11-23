@@ -8,10 +8,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { ArrowRight, Check, Clock, Play, ShieldCheck, X } from 'lucide-react';
+import { ArrowRight, Check, Clock, Play, X } from 'lucide-react';
 import { apiRequest, formatCurrency, formatCurrencyWhole, hasPerm } from '../lib/api';
-import type { AuthUser, NavSection } from '../types/hrm';
+import type { AuditLogEntry, AuthUser, NavSection } from '../types/hrm';
 import { LoadingBlock, MetricStrip, PageHeader, StatusText } from '../components/ui/Primitives';
+import { AuditLog } from '../components/dashboard/AuditLog';
 
 interface DashboardData {
   kpis: {
@@ -60,14 +61,7 @@ interface DashboardData {
     approval_chain_json: string;
     current_step: number;
   }>;
-  recentAudit: Array<{
-    id: number;
-    actor_email: string;
-    action: string;
-    resource: string;
-    resource_id: string | null;
-    created_at: string;
-  }>;
+  recentAudit: AuditLogEntry[];
   selfService: {
     todayAttendance: { clock_in: string; clock_out: string | null; worked_hours: number; status: string } | null;
     annualLeaveRemaining: number;
@@ -91,6 +85,7 @@ export function DashboardView({
 }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshingAudit, setRefreshingAudit] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
   const isExecutive =
@@ -98,14 +93,23 @@ export function DashboardView({
     user.roles.includes('hr_admin') ||
     user.roles.includes('manager');
 
-  async function fetchDashboard() {
-    setLoading(true);
+  async function fetchDashboard(silent = false) {
+    if (!silent) setLoading(true);
     try {
       const qs = selectedBranchId ? `?branchId=${selectedBranchId}` : '';
       const res = await apiRequest<DashboardData>(`/api/dashboard${qs}`);
       setData(res);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
+    }
+  }
+
+  async function handleRefreshAudit() {
+    setRefreshingAudit(true);
+    try {
+      await fetchDashboard(true);
+    } finally {
+      setRefreshingAudit(false);
     }
   }
 
@@ -443,97 +447,71 @@ export function DashboardView({
         </div>
       )}
 
-      {/* Multi-Branch Operations Table & Recent Audit Ledger */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <section className="lg:col-span-7 bg-white dark:bg-[#111827] border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden">
-          <div className="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-50">
-                Multi-Branch Footprint
-              </h2>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                Headcount, regional withholding rate, and annualized payroll run-rate
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => onNavigate('people')}
-              className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-            >
-              Manage Branches
-            </button>
+      {/* Multi-Branch Operations Table */}
+      <section className="bg-white dark:bg-[#111827] border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden">
+        <div className="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-50">
+              Multi-Branch Footprint
+            </h2>
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+              Headcount, regional withholding rate, and annualized payroll run-rate
+            </p>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-neutral-200 dark:border-neutral-800 text-[11px] font-medium text-neutral-500 dark:text-neutral-400">
-                  <th className="px-5 py-2.5">Branch</th>
-                  <th className="px-4 py-2.5">Location</th>
-                  <th className="px-4 py-2.5 text-right">Headcount</th>
-                  <th className="px-4 py-2.5 text-right">State/Local Tax</th>
-                  <th className="px-5 py-2.5 text-right">Annualized Comp</th>
+          <button
+            type="button"
+            onClick={() => onNavigate('people')}
+            className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+          >
+            Manage Branches
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-neutral-200 dark:border-neutral-800 text-[11px] font-medium text-neutral-500 dark:text-neutral-400">
+                <th className="px-5 py-2.5">Branch</th>
+                <th className="px-4 py-2.5">Location</th>
+                <th className="px-4 py-2.5 text-right">Headcount</th>
+                <th className="px-4 py-2.5 text-right">State/Local Tax</th>
+                <th className="px-5 py-2.5 text-right">Annualized Comp</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-200 dark:divide-neutral-800 text-xs">
+              {data.branchBreakdown.map((b) => (
+                <tr key={b.id} className="hover:bg-neutral-50 dark:hover:bg-neutral-800/40">
+                  <td className="px-5 py-3 font-medium text-neutral-900 dark:text-neutral-100">
+                    {b.name}{' '}
+                    <span className="font-mono text-[11px] text-neutral-400 ml-1">{b.code}</span>
+                  </td>
+                  <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">{b.city}</td>
+                  <td className="px-4 py-3 text-right font-mono tabular-nums text-neutral-900 dark:text-neutral-100">
+                    {b.headcount}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono tabular-nums text-neutral-600 dark:text-neutral-400">
+                    {(b.state_tax_rate * 100).toFixed(1)}%
+                  </td>
+                  <td className="px-5 py-3 text-right font-mono tabular-nums font-medium text-neutral-900 dark:text-neutral-100">
+                    {formatCurrencyWhole(b.annual_payroll)}
+                  </td>
                 </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-200 dark:divide-neutral-800 text-xs">
-                {data.branchBreakdown.map((b) => (
-                  <tr key={b.id} className="hover:bg-neutral-50 dark:hover:bg-neutral-800/40">
-                    <td className="px-5 py-3 font-medium text-neutral-900 dark:text-neutral-100">
-                      {b.name}{' '}
-                      <span className="font-mono text-[11px] text-neutral-400 ml-1">{b.code}</span>
-                    </td>
-                    <td className="px-4 py-3 text-neutral-600 dark:text-neutral-400">{b.city}</td>
-                    <td className="px-4 py-3 text-right font-mono tabular-nums text-neutral-900 dark:text-neutral-100">
-                      {b.headcount}
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono tabular-nums text-neutral-600 dark:text-neutral-400">
-                      {(b.state_tax_rate * 100).toFixed(1)}%
-                    </td>
-                    <td className="px-5 py-3 text-right font-mono tabular-nums font-medium text-neutral-900 dark:text-neutral-100">
-                      {formatCurrencyWhole(b.annual_payroll)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-        <section className="lg:col-span-5 bg-white dark:bg-[#111827] border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden">
-          <div className="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              <h2 className="text-sm font-semibold text-neutral-900 dark:text-neutral-50">
-                Recent Audit Trail
-              </h2>
-            </div>
-            <button
-              type="button"
-              onClick={() => onNavigate('security')}
-              className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
-            >
-              Inspect Chain
-            </button>
-          </div>
-          <div className="divide-y divide-neutral-200 dark:divide-neutral-800">
-            {data.recentAudit.slice(0, 6).map((log) => (
-              <div key={log.id} className="px-5 py-2.5 flex items-center justify-between gap-3 text-xs">
-                <div className="min-w-0">
-                  <div className="font-mono text-[11px] font-medium text-neutral-900 dark:text-neutral-100 truncate">
-                    {log.action}
-                  </div>
-                  <div className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate">
-                    {log.actor_email ?? 'system'} · {log.resource}
-                    {log.resource_id ? ` #${log.resource_id}` : ''}
-                  </div>
-                </div>
-                <span className="font-mono tabular-nums text-[11px] text-neutral-400 shrink-0">
-                  {log.created_at.slice(5, 16).replace('T', ' ')}
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
+      {/* Read-Only Audit Log Table (Employee Actions, Payroll Modifications, System Changes) */}
+      <AuditLog
+        entries={data.recentAudit}
+        onRefresh={handleRefreshAudit}
+        refreshing={refreshingAudit}
+        onInspectFullChain={
+          hasPerm(user.permissions, user.roles, 'security.manage')
+            ? () => onNavigate('security')
+            : undefined
+        }
+      />
     </div>
   );
 }

@@ -1,5 +1,8 @@
 {
   "name": "Nexus HRM",
-  "description": "Industry-standard multi-branch enterprise Human Resource Management platform featuring statutory payroll, uniform RBAC and TOTP MFA, tamper-evident audit logging, custom approval workflows, executive analytics, and public REST API with signed webhooks.",
-  "requestFramePermissions": []
+  "description": "Industry-standard multi-branch enterprise Human Resource Management platform featuring statutory payroll, uniform RBAC and TOTP MFA, tamper-evident audit logging, custom approval workflows, executive analytics, Firebase Firestore persistence, Gemini HR Assistant, and public REST API with signed webhooks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

@@ -4,9 +4,11 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { CheckCircle2, X } from 'lucide-react';
 import { apiRequest, setAuthToken } from './lib/api';
 import { signOutSupabase } from './lib/supabase';
+import { signOutFirebase } from './lib/firebase';
 import type { AuthUser, Branch, NavSection } from './types/hrm';
 import { AuthScreen } from './components/auth/AuthScreen';
 import { AppShell } from './components/layout/AppShell';
+import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { PublicCareersView } from './views/PublicCareersView';
 import { DashboardView } from './views/DashboardView';
 import { PeopleView } from './views/PeopleView';
@@ -16,6 +18,7 @@ import { RecruitmentView } from './views/RecruitmentView';
 import { PerformanceView } from './views/PerformanceView';
 import { OperationsView } from './views/OperationsView';
 import { AnalyticsWorkflowsView } from './views/AnalyticsWorkflowsView';
+import { HrAssistantView } from './views/HrAssistantView';
 import { SecurityDeveloperView } from './views/SecurityDeveloperView';
 
 export function App() {
@@ -104,6 +107,7 @@ export function App() {
       await Promise.all([
         apiRequest('/api/auth/logout', { method: 'POST' }),
         signOutSupabase(),
+        signOutFirebase(),
       ]);
     } catch {
       // ignore
@@ -129,7 +133,7 @@ export function App() {
   }
 
   return (
-    <>
+    <ErrorBoundary>
       <AppShell
         user={user}
         branches={branches}
@@ -208,6 +212,14 @@ export function App() {
             onToast={showToast}
           />
         )}
+        {activeSection === 'assistant' && (
+          <HrAssistantView
+            user={user}
+            branches={branches}
+            selectedBranchId={selectedBranchId}
+            onToast={showToast}
+          />
+        )}
         {activeSection === 'security' && (
           <SecurityDeveloperView
             user={user}
@@ -236,7 +248,7 @@ export function App() {
           </button>
         </div>
       )}
-    </>
+    </ErrorBoundary>
   );
 }
 

@@ -1,0 +1,245 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny all unspecified paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Global Hardened Primitives
+    // -------------------------------------------------------------------------
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isVerifiedUser() && request.auth.uid == uid;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'shakuatshraban935@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin()
+        || (isVerifiedUser() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Entity Validation Blueprints (Anti-Update-Gap)
+    // -------------------------------------------------------------------------
+    function isValidUserProfile(data, expectedUid) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'email', 'department', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == expectedUid
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && (!('department' in data) || (data.department is string && data.department.size() >= 1 && data.department.size() <= 80))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatSession(data, expectedOwnerUid) {
+      return data.keys().hasAll(['ownerUid', 'title', 'persona', 'model', 'status', 'messageCount', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerUid', 'title', 'persona', 'model', 'status', 'messageCount', 'createdAt', 'updatedAt'])
+        && isValidId(data.ownerUid)
+        && data.ownerUid == expectedOwnerUid
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && data.persona in ['hr_advisor', 'payroll_specialist', 'quick_assistant']
+        && data.model in ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+        && data.status in ['active', 'archived']
+        && data.messageCount is int && data.messageCount >= 0 && data.messageCount <= 5000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatMessage(data, expectedOwnerUid, sessionId) {
+      return data.keys().hasAll(['ownerUid', 'sessionId', 'sender', 'content', 'model', 'createdAt'])
+        && data.keys().hasOnly(['ownerUid', 'sessionId', 'sender', 'content', 'model', 'createdAt'])
+        && isValidId(data.ownerUid)
+        && data.ownerUid == expectedOwnerUid
+        && isValidId(data.sessionId)
+        && data.sessionId == sessionId
+        && data.sender in ['user', 'assistant']
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 16000
+        && data.model is string && data.model.size() >= 1 && data.model.size() <= 60
+        && data.createdAt is timestamp;
+    }
+
+    function isValidHrNote(data, expectedOwnerUid) {
+      return data.keys().hasAll(['ownerUid', 'title', 'category', 'body', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerUid', 'title', 'category', 'body', 'status', 'createdAt', 'updatedAt'])
+        && isValidId(data.ownerUid)
+        && data.ownerUid == expectedOwnerUid
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && data.category in ['Policy', 'Payroll', 'Compliance', 'General']
+        && data.body is string && data.body.size() >= 1 && data.body.size() <= 4000
+        && data.status in ['open', 'resolved']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data, adminId) {
+      return data.keys().hasAll(['uid', 'email', 'grantedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'grantedAt'])
+        && isValidId(data.uid)
+        && data.uid == adminId
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && data.grantedAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Admins Collection (Trusted RBAC Source)
+    // -------------------------------------------------------------------------
+    match /admins/{adminId} {
+      allow get: if isVerifiedUser() && isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isBootstrappedAdmin();
+      allow create: if isAdmin() && isValidId(adminId) && isValidAdminRecord(incoming(), adminId)
+        && incoming().grantedAt == request.time;
+      allow update: if isAdmin() && isValidId(adminId) && isValidAdminRecord(incoming(), adminId)
+        && incoming().uid == existing().uid
+        && incoming().grantedAt == existing().grantedAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email']);
+      allow delete: if isAdmin() && isValidId(adminId);
+    }
+
+    // -------------------------------------------------------------------------
+    // Users Collection (PII Isolated to Owner or Admin)
+    // -------------------------------------------------------------------------
+    match /users/{userId} {
+      allow get: if isVerifiedUser() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isVerifiedUser() && resource.data.uid == request.auth.uid;
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), request.auth.uid)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'department', 'updatedAt']))
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
+
+      // -----------------------------------------------------------------------
+      // Multi-Turn Gemini Chat Sessions (Master Gate: Parent User Exists)
+      // -----------------------------------------------------------------------
+      match /chatSessions/{sessionId} {
+        allow get: if isVerifiedUser() && isValidId(userId) && isValidId(sessionId) && (isOwner(userId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(sessionId)
+          && isValidChatSession(incoming(), request.auth.uid)
+          && incoming().status == 'active'
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(sessionId)
+          && isValidChatSession(incoming(), userId)
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              isOwner(userId) && existing().status == 'active' && (
+                incoming().diff(existing()).affectedKeys().hasOnly(['title', 'persona', 'model', 'messageCount', 'updatedAt']) ||
+                (incoming().status == 'archived' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+              )
+            )
+          );
+
+        allow delete: if isVerifiedUser() && isValidId(userId) && isValidId(sessionId) && (isOwner(userId) || isAdmin());
+
+        // ---------------------------------------------------------------------
+        // Chat Messages Subcollection (Master Gate: Parent Session Active)
+        // ---------------------------------------------------------------------
+        match /messages/{messageId} {
+          allow get: if isVerifiedUser() && isValidId(userId) && isValidId(sessionId) && isValidId(messageId)
+            && (isOwner(userId) || isAdmin());
+          allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+
+          allow create: if isOwner(userId)
+            && isValidId(userId)
+            && isValidId(sessionId)
+            && isValidId(messageId)
+            && isValidChatMessage(incoming(), request.auth.uid, sessionId)
+            && incoming().createdAt == request.time
+            && get(/databases/$(database)/documents/users/$(userId)/chatSessions/$(sessionId)).data.ownerUid == request.auth.uid
+            && get(/databases/$(database)/documents/users/$(userId)/chatSessions/$(sessionId)).data.status == 'active';
+
+          allow update: if false;
+          allow delete: if isVerifiedUser() && isValidId(userId) && isValidId(sessionId) && isValidId(messageId)
+            && (isOwner(userId) || isAdmin());
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // Personal HR Notes Subcollection (Master Gate: Parent User Exists)
+      // -----------------------------------------------------------------------
+      match /hrNotes/{noteId} {
+        allow get: if isVerifiedUser() && isValidId(userId) && isValidId(noteId) && (isOwner(userId) || isAdmin());
+        allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(noteId)
+          && isValidHrNote(incoming(), request.auth.uid)
+          && incoming().status == 'open'
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(noteId)
+          && isValidHrNote(incoming(), userId)
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              isOwner(userId) && existing().status == 'open' && (
+                incoming().diff(existing()).affectedKeys().hasOnly(['title', 'category', 'body', 'updatedAt']) ||
+                (incoming().status == 'resolved' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+              )
+            )
+          );
+
+        allow delete: if isVerifiedUser() && isValidId(userId) && isValidId(noteId) && (isOwner(userId) || isAdmin());
+      }
+    }
+  }
+}

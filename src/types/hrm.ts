@@ -148,4 +148,18 @@ export type NavSection =
   | 'performance'
   | 'operations'
   | 'analytics'
+  | 'assistant'
   | 'security';
+
+export interface AuditLogEntry {
+  id: number;
+  actor_email: string | null;
+  action: string;
+  resource: string;
+  resource_id: string | null;
+  before_data?: string | null;
+  after_data?: string | null;
+  ip_address?: string | null;
+  entry_hash?: string | null;
+  created_at: string;
+}

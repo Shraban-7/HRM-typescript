@@ -11,6 +11,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessageSquareText,
   Moon,
   Search,
   Shield,
@@ -55,6 +56,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'performance', label: 'Performance & OKRs', group: 'Talent', icon: TrendingUp, permission: 'performance.view' },
   { id: 'operations', label: 'Workplace Ops', group: 'Operations', icon: FolderKanban },
   { id: 'analytics', label: 'Analytics & Workflows', group: 'Intelligence', icon: BarChart3, permission: 'analytics.view' },
+  { id: 'assistant', label: 'HR Assistant', group: 'Intelligence', icon: MessageSquareText },
   { id: 'security', label: 'Security & API', group: 'Governance', icon: Shield },
 ];
 
@@ -322,6 +324,20 @@ export function AppShell({
                 ))}
               </select>
             </div>
+
+            {/* HR Assistant Shortcut */}
+            <button
+              type="button"
+              onClick={() => onSelectSection('assistant')}
+              className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md border transition-colors cursor-pointer whitespace-nowrap ${
+                activeSection === 'assistant'
+                  ? 'bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300'
+                  : 'bg-neutral-50 dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:text-blue-600 dark:hover:text-blue-400'
+              }`}
+            >
+              <MessageSquareText className="w-3.5 h-3.5" />
+              <span>HR Assistant</span>
+            </button>
 
             {/* Cmd+K Quick Jump */}
             <button

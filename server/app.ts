@@ -1,5 +1,6 @@
 import express from 'express';
 import { getDatabaseMode, initDatabase } from './db';
+import { DatabaseConfigError } from './dbClient';
 import { isSupabaseConfigured } from './services/supabaseAuth';
 import { authRouter } from './routes/authRoutes';
 import { coreRouter } from './routes/coreRoutes';
@@ -29,7 +30,33 @@ export function createApp(): express.Express {
     next();
   });
 
-  // Ensure Supabase PostgreSQL or SQLite schema + seed are initialized before handling requests
+  // Health endpoint placed BEFORE database middleware so diagnostics work even if DB env is misconfigured
+  app.get('/api/health', async (_req, res) => {
+    let databaseReady = false;
+    let databaseErrorCode: string | null = null;
+    try {
+      await initDatabase();
+      databaseReady = true;
+    } catch (err) {
+      databaseReady = false;
+      databaseErrorCode =
+        err instanceof DatabaseConfigError ? err.code : 'database_connection_failed';
+    }
+
+    res.status(databaseReady ? 200 : 503).json({
+      ok: databaseReady,
+      service: 'nexus-hrm',
+      framework: 'next.js',
+      databaseMode: getDatabaseMode(),
+      databaseReady,
+      databaseErrorCode,
+      supabaseAuthEnabled: isSupabaseConfigured(),
+      geminiConfigured: Boolean(process.env.GEMINI_API_KEY?.trim()),
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // Ensure PostgreSQL or SQLite schema + seed are initialized before handling API routes
   app.use(async (_req, _res, next) => {
     try {
       await initDatabase();
@@ -37,18 +64,6 @@ export function createApp(): express.Express {
     } catch (err) {
       next(err);
     }
-  });
-
-  // Health endpoint
-  app.get('/api/health', (_req, res) => {
-    res.json({
-      ok: true,
-      service: 'nexus-hrm',
-      framework: 'next.js',
-      databaseMode: getDatabaseMode(),
-      supabaseAuthEnabled: isSupabaseConfigured(),
-      timestamp: new Date().toISOString(),
-    });
   });
 
   // Mount API route modules
@@ -67,10 +82,13 @@ export function createApp(): express.Express {
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    console.error('[Nexus HRM API Error]', err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'An unexpected server error occurred.' });
+    console.error('[Nexus HRM API Error]', err.name, err.message);
+    if (res.headersSent) return;
+    if (err instanceof DatabaseConfigError) {
+      res.status(503).json({ error: err.message, code: err.code });
+      return;
     }
+    res.status(500).json({ error: 'An unexpected server error occurred. Check /api/health and server logs.' });
   });
 
   globalThis._nexusExpressApp = app;
